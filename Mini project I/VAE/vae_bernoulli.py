@@ -15,10 +15,24 @@ import numpy as np
 from sklearn.decomposition import PCA
 from scipy.stats import gaussian_kde
 
-# python3 vae_bernoulli.py train --device mps --latent-dim 30 --epochs 15 --batch-size 128 --model model.pt
-# python3 vae_bernoulli.py sample --device mps --latent-dim 30 --model model.pt --samples samples.png
-# python3 vae_bernoulli.py evaluate_elbo --device mps --latent-dim 30 --model model.pt
-# python3 vae_bernoulli.py evaluate_elbo_mean_std --device mps --latent-dim 30 --epochs 15 --batch-size 128
+# Gaussian
+# python3 vae_bernoulli.py train --device mps --latent-dim 30 --epochs 30 --batch-size 128 --model gaussian_prior.pt --prior g
+# python3 vae_bernoulli.py sample --device mps --latent-dim 30 --model gaussian_prior.pt --samples samples_gaussian.png --prior g
+# python3 vae_bernoulli.py evaluate_elbo --device mps --latent-dim 30 --model gaussian_prior.pt --prior g
+# python3 vae_bernoulli.py evaluate_elbo_mean_std --device mps --latent-dim 30 --epochs 30 --batch-size 128 --prior g
+
+# Mixture of Gaussians
+# python3 vae_bernoulli.py train --device mps --latent-dim 30 --epochs 30 --batch-size 128 --model mog_prior.pt --prior m
+# python3 vae_bernoulli.py sample --device mps --latent-dim 30 --model mog_prior.pt --samples samples_mog.png --prior m
+# python3 vae_bernoulli.py evaluate_elbo --device mps --latent-dim 30 --model mog_prior.pt --prior m
+# python3 vae_bernoulli.py evaluate_elbo_mean_std --device mps --latent-dim 30 --epochs 30 --batch-size 128 --prior m
+
+# VampPrior
+# python3 vae_bernoulli.py train --device mps --latent-dim 30 --epochs 30 --batch-size 128 --model vamp_prior.pt --prior v
+# python3 vae_bernoulli.py sample --device mps --latent-dim 30 --model vamp_prior.pt --samples samples_vamp.png --prior v
+# python3 vae_bernoulli.py evaluate_elbo --device mps --latent-dim 30 --model vamp_prior.pt --prior v
+# python3 vae_bernoulli.py evaluate_elbo_mean_std --device mps --latent-dim 30 --epochs 30 --batch-size 128 --prior v
+
 
 
 import torch
@@ -610,6 +624,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='batch size for training (default: %(default)s)')
     parser.add_argument('--epochs', type=int, default=10, metavar='N', help='number of epochs to train (default: %(default)s)')
     parser.add_argument('--latent-dim', type=int, default=32, metavar='N', help='dimension of latent variable (default: %(default)s)')
+    parser.add_argument('--prior', type=str, default='g', choices=['g', 'm', 'v'], help='prior to use (default: %(default)s)')
 
     args = parser.parse_args()
     print('# Options')
@@ -655,9 +670,9 @@ if __name__ == "__main__":
     encoder = GaussianEncoder(encoder_net)
     
     # CHOOSE PRIOR
-    # prior = GaussianPrior(M)
-    # prior = MixtureOfGaussiansPrior(M)
-    prior = VampPrior(L=M, D=784, num_vals=20, encoder=encoder, num_components=1000)
+    if args.prior == 'g':  prior = GaussianPrior(M)
+    elif args.prior == 'm': prior = MixtureOfGaussiansPrior(M)
+    elif args.prior == 'v': prior = VampPrior(L=M, D=784, num_vals=20, encoder=encoder, num_components=1000)
 
     model = VAE(prior, decoder, encoder).to(device)
         
