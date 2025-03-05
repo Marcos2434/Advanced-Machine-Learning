@@ -45,14 +45,24 @@ class DDPM(nn.Module):
         [torch.Tensor]
             The negative ELBO of the batch of dimension `(batch_size,)`.
         """
+        batch_size = x.shape[0]  
+        
+        # Sample a random timestep t for each sample in the batch
+        t = torch.randint(0, self.T - 1, (batch_size, 1), device=x.device)
 
-        ### Implement Algorithm 1 here ###
-        t = torch.randint(low=0, high=self.T-1, size=(x.shape[0], 1)).to(x.device)
-        noise = torch.randn_like(x).to(x.device)
-        network_input = torch.sqrt(self.alpha_cumprod[t]) * x + torch.sqrt(1 - self.alpha_cumprod[t]) * noise
-        noise_pred = self.network(network_input, t / self.T) # normalize the time steps to be between 0 and 1 (optimization)
-        neg_elbo = F.mse_loss(noise_pred, noise)
-        return neg_elbo
+        # Generate Gaussian noise
+        noise = torch.randn_like(x, device=x.device)
+
+        # Apply the forward diffusion process
+        alpha_t = torch.sqrt(self.alpha_cumprod[t])  # Noise scaling factor
+        sigma_t = torch.sqrt(1 - self.alpha_cumprod[t])  # Noise variance factor
+        noisy_x = alpha_t * x + sigma_t * noise  # Noisy input
+
+        # Predict the noise using the denoising network
+        noise_pred = self.network(noisy_x, t / self.T)
+
+        # Compute MSE loss between predicted and actual noise
+        return F.mse_loss(noise_pred, noise)
 
     def sample(self, shape):
         """
@@ -65,17 +75,24 @@ class DDPM(nn.Module):
         [torch.Tensor]
             The generated samples.
         """
-        # Sample x_t for t=T (i.e., Gaussian noise)
-        x_t = torch.randn(shape).to(self.alpha.device)
+        # Initialize x_T as a standard normal distribution (starting point for diffusion process)
+        x_t = torch.randn(shape, device=self.alpha.device)
 
-        # Sample x_t given x_{t+1} until x_0 is sampled
-        for t in range(self.T-1, -1, -1):
-            ### Implement the remaining of Algorithm 2 here ###
-            z = torch.randn(shape) if t > 0 else torch.zeros(shape)
-            z = z.to(x_t.device)
-            tensor_t = torch.full((shape[0], 1), t).to(x_t.device)
+        # Reverse diffusion process: iteratively denoise from T-1 to 0
+        for t in range(self.T - 1, -1, -1):
+            # Sample Gaussian noise (except at t=0, where it's zero)
+            z = torch.randn(shape, device=x_t.device) if t > 0 else torch.zeros(shape, device=x_t.device)
+
+            # Create a tensor containing the current timestep t
+            tensor_t = torch.full((shape[0], 1), t, device=x_t.device)
+
+            # Predict noise using the denoising network
             noise_pred = self.network(x_t, tensor_t / self.T)
-            x_t = (1 / torch.sqrt(self.alpha[t])) * (x_t - (1 - self.alpha[t]) / torch.sqrt(1 - self.alpha_cumprod[t]) * noise_pred) + torch.sqrt(self.beta[t]) * z
+
+            # Compute the next step in the reverse process
+            coef1 = (1 - self.alpha[t]) / torch.sqrt(1 - self.alpha_cumprod[t])
+            x_t = (x_t - coef1 * noise_pred) / torch.sqrt(self.alpha[t])
+            x_t += torch.sqrt(self.beta[t]) * z  # Add noise for stochasticity
 
         return x_t
 
