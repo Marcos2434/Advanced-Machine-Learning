@@ -271,7 +271,7 @@ def train(model, optimizer, train_loader, test_loader, epochs, device, args, sav
     val_losses = []
 
     # Initialize best validation loss tracking
-    best_train_loss = float('inf')
+    best_val_loss = float('inf')
     best_epoch = 0
     best_model = None
     train_loss_best_model = float('inf')
@@ -327,9 +327,9 @@ def train(model, optimizer, train_loader, test_loader, epochs, device, args, sav
         avg_val_loss = torch.mean(torch.tensor(epoch_val_losses))
         val_losses.append(avg_val_loss.item())
 
-        # Check if this is the best train loss
-        if avg_train_loss < best_train_loss:
-            best_train_loss = avg_train_loss.item()
+        # Check if this is the best validation loss
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss.item()
             best_epoch = epoch + 1
             best_model = model.state_dict()
             train_loss_best_model = avg_train_loss.item()
@@ -341,16 +341,26 @@ def train(model, optimizer, train_loader, test_loader, epochs, device, args, sav
                 'model_state_dict': best_model,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': train_loss_best_model,
-                'val_loss': best_train_loss
-            }, save_path + f'{args.data}_train-loss={train_loss_best_model:.0f}_epoch={best_epoch}_bs={args.batch_size}_mask={args.mask_type}_trans={args.num_trans}_hidden={args.num_hidden}.pt')    
+                'val_loss': best_val_loss
+            }, save_path + f'{args.data}_train-loss={train_loss_best_model:.0f}_val-loss={best_val_loss:.0f}_epoch={best_epoch}_bs={args.batch_size}_mask={args.mask_type}_trans={args.num_trans}_hidden={args.num_hidden}.pt')    
         
         # Print epoch summary
         # print(f"Epoch {epoch+1}/{epochs}: Train Loss = {avg_train_loss.item():.4f}, Val Loss = {avg_val_loss.item():.4f}")
     
+    # Save last model
+    if save_path:
+        torch.save({
+            'epoch': epochs,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': train_losses[-1],
+            'val_loss': val_losses[-1]
+        }, save_path + f'{args.data}_train-loss={train_losses[-1]:.0f}_val-loss={val_losses[-1]:.0f}_epoch={epochs}_bs={args.batch_size}_mask={args.mask_type}_trans={args.num_trans}_hidden={args.num_hidden}.pt')    
+
     # Final summary of best model
-    print(f"\nBest Model - Epoch {best_epoch}: Train Loss = {best_train_loss:.4f}")
+    print(f"\nBest Model - Epoch {best_epoch}: Validation Loss = {best_val_loss:.4f}")
     
-    return train_losses, val_losses, best_train_loss, best_epoch
+    return train_losses, val_losses, best_val_loss, best_epoch
 
 # Masking strategy 1: Random initialized masking
 def create_random_mask(D, seed=None):
@@ -492,8 +502,7 @@ def build_flow_with_checkerboard_masks(D, height, width, num_transformations, nu
 def parse_filename(filename: str) -> dict:
     filename = os.path.basename(filename)  # Extract only the filename if it's a path
     
-    # pattern = (r"(?P<data>.*?)_train-loss=(?P<train_loss>-?\d+)_val-loss=(?P<val_loss>-?\d+)_"
-    pattern = (r"(?P<data>.*?)_train-loss=(?P<train_loss>-?\d+)_"
+    pattern = (r"(?P<data>.*?)_train-loss=(?P<train_loss>-?\d+)_val-loss=(?P<val_loss>-?\d+)_"
                r"epoch=(?P<epoch>\d+)_bs=(?P<batch_size>\d+)_"
                r"mask=(?P<mask_type>\w+)_trans=(?P<num_trans>\d+)_"
                r"hidden=(?P<num_hidden>\d+)\.pt")
@@ -504,7 +513,7 @@ def parse_filename(filename: str) -> dict:
     
     result = match.groupdict()
     result["train_loss"] = int(result["train_loss"])
-    # result["val_loss"] = int(result["val_loss"])
+    result["val_loss"] = int(result["val_loss"])
     result["epoch"] = int(result["epoch"])
     result["batch_size"] = int(result["batch_size"])
     result["num_trans"] = int(result["num_trans"])
@@ -599,7 +608,7 @@ if __name__ == "__main__":
         model_save_path = f'models/'
 
         # Train model with validation and best model saving
-        train_losses, val_losses, best_train_loss, best_epoch = train(
+        train_losses, val_losses, best_val_loss, best_epoch = train(
             model, 
             optimizer, 
             train_loader, 
@@ -627,7 +636,7 @@ if __name__ == "__main__":
         # Print final losses and best model information
         print(f"Best Model Information:")
         print(f"  Epoch: {best_epoch}")
-        print(f"  Best Validation Loss: {best_train_loss:.4f}")
+        print(f"  Best Validation Loss: {best_val_loss:.4f}")
         print(f"  Model saved to: {model_save_path}")
         print(f"  Loss plot saved to: {loss_plot_path}")
 
