@@ -693,8 +693,8 @@ if __name__ == "__main__":
         # Generate samples
         model.eval()
         with torch.no_grad():
-            samples = (model.sample(64)).cpu() 
-            save_image(samples.view(64, 1, 28, 28), args.samples)
+            samples = (model.sample(4)).cpu() 
+            save_image(samples.view(4, 1, 28, 28), args.samples)
     
     elif args.mode == 'evaluate_elbo':
         # python3 vae_bernoulli.py evaluate_elbo --device cpu --latent-dim 10 --model model.pt
