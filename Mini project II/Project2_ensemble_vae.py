@@ -546,6 +546,7 @@ if __name__ == "__main__":
         ax.set_aspect('auto')
         plt.tight_layout()
         plt.show()
+        plt.savefig("plot_first_part.png")
 
 ########################################
 ## Old implementation of the plotting ##

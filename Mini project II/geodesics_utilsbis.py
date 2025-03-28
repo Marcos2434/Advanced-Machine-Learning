@@ -2,6 +2,9 @@
 import torch
 from torch.autograd.functional import jacobian
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+import numpy as np
+import random
 
 def compute_decoder_jacobian(decoder, z):
     """
@@ -68,48 +71,53 @@ def compute_energy(decoder, curve_points):
     return energy
 
 
-def optimize_geodesic(decoder, z_start, z_end, num_points=10, num_iters=500, lr=1e-2):
-    """
-    Optimize Geodesic via Energy Minimization
-    Compute geodesic from z_start to z_end using energy minimization.
-    Args:
-        decoder: decoder network
-        z_start, z_end: torch.Tensor of shape (M,)
-        num_points: number of total points in curve
-        num_iters: gradient descent steps
-        lr: learning rate
-    Returns:
-        List of torch.Tensor geodesic points
-    """
-    M = z_start.shape[-1]
+# def optimize_geodesic(decoder, z_start, z_end, num_points=10, num_iters=500, lr=1e-2):
+#     """
+#     Optimize Geodesic via Energy Minimization
+#     Compute geodesic from z_start to z_end using energy minimization.
     
-    # Initialize intermediate points
-    # we use torch.no_grad() to disable gradient tracking for the initialization
-    with torch.no_grad(): 
-        # Inital guess: straight line from z_start to z_end
-        inits = [z_start + (i / (num_points - 1)) * (z_end - z_start) for i in range(num_points)]
-    intermediates = [torch.nn.Parameter(p.clone()) for p in inits[1:-1]] # exclude endpoints
+#     Args:
+#     decoder: decoder network
+#     z_start, z_end: torch.Tensor of shape (M,)
+#     num_points: number of total points in curve
+#     num_iters: gradient descent steps
+#     lr: learning rate
     
-    optimizer = torch.optim.Adam(intermediates, lr=lr) # optimizer for the intermediate points
-
-    # Find geodesic with minimum energy
-    for _ in range(num_iters):
-        optimizer.zero_grad()
-        curve = [z_start] + intermediates + [z_end] # make the curve by concatenating all points
-        energy = compute_energy(decoder, curve) # energy is differentiable w.r.t. intermediate points
+#     Returns:
+#     List of torch.Tensor geodesic points
+#     """
+#     M = z_start.shape[-1]
+    
+#     # Initialize intermediate points
+#     # we use torch.no_grad() to disable gradient tracking for the initialization
+#     with torch.no_grad():
+#         # Inital guess: straight line from z_start to z_end
+#         inits = [z_start + (i / (num_points - 1)) * (z_end - z_start) for i in range(num_points)]
+#         intermediates = [torch.nn.Parameter(p.clone()) for p in inits[1:-1]] # exclude endpoints
+    
+#     optimizer = torch.optim.Adam(intermediates, lr=lr) # optimizer for the intermediate points
+    
+#     # Find geodesic with minimum energy
+#     # Wrap the range with tqdm for a progress bar
+#     for _ in tqdm(range(num_iters), desc="Optimizing Geodesic"):
+#         optimizer.zero_grad()
         
-        # compute the gradient of the energy (that is dependent the jacobian of the decoder) 
-        # so that the optimizer can update the intermediate points by moving them in the 
-        # direction of the negative gradient
-        energy.backward() 
+#         curve = [z_start] + intermediates + [z_end] # make the curve by concatenating all points
+#         energy = compute_energy(decoder, curve) # energy is differentiable w.r.t. intermediate points
         
-        # we take the step in that negative gradient direction
-        optimizer.step()
-
-    with torch.no_grad():
-        curve = [z_start] + [p.clone() for p in intermediates] + [z_end]
-    return curve
-
+#         # compute the gradient of the energy (that is dependent the jacobian of the decoder)
+#         # so that the optimizer can update the intermediate points by moving them in the
+#         # direction of the negative gradient
+#         energy.backward()
+        
+#         # we take the step in that negative gradient direction
+#         optimizer.step()
+    
+#     # Final curve extraction
+#     with torch.no_grad():
+#         curve = [z_start] + [p.clone() for p in intermediates] + [z_end]
+    
+#     return curve
 
 def plot_geodesic_latents(geodesic, ax=None, color='C0', show_endpoints=True, label_once=False):
     """
@@ -120,18 +128,19 @@ def plot_geodesic_latents(geodesic, ax=None, color='C0', show_endpoints=True, la
     if ax is None:
         fig, ax = plt.subplots()
 
-    points = torch.stack(geodesic).detach().cpu().numpy()
-    z1, z2 = points[:, 0], points[:, 1] # points of the geodesic in latent space
+    # geodesic is already a tensor of shape (num_points, M), no need to stack
+    points = geodesic.detach().cpu().numpy()  # Shape: (num_points, M)
+    z1, z2 = points[:, 0], points[:, 1]  # points of the geodesic in latent space
 
     # Add labels only for first call if label_once=True
     geodesic_label = 'Pullback geodesic' if not label_once else None
     straight_label = 'Straight line' if not label_once else None
 
     # Plot geodesic curve (solid)
-    ax.plot(z1, z2, '-', lw=2, color=color, label='Pullback geodesic')
+    ax.plot(z1, z2, '-', lw=2, color=color, label=geodesic_label)
 
     # Plot straight line between endpoints (dashed)
-    ax.plot([z1[0], z1[-1]], [z2[0], z2[-1]], '--', color=color, alpha=0.5, label='Straight line')
+    ax.plot([z1[0], z1[-1]], [z2[0], z2[-1]], '--', color=color, alpha=0.5, label=straight_label)
 
     # Optionally mark endpoints
     if show_endpoints:
@@ -143,19 +152,6 @@ def plot_geodesic_latents(geodesic, ax=None, color='C0', show_endpoints=True, la
     ax.set_title('Geodesic in Latent Space')
     ax.axis('equal')
     ax.grid(True)
-    #plt.show()
-    #if ax is None:
-    #    plt.legend()
-    #    plt.show()
-    ### This one works
-    """
-    Plot geodesic path in 2D latent space.
-    points = torch.stack(geodesic).detach().cpu().numpy()
-    plt.plot(points[:, 0], points[:, 1], marker='o')
-    plt.title("Latent Space Geodesic")
-    plt.axis('equal')
-    plt.grid(True)
-    plt.show()"""
 
 
 
@@ -176,19 +172,18 @@ def plot_decoded_images(decoder, geodesic):
     plt.show()
 
 
-def plot_latent_std_background(decoder, grid_size=100, zlim=6, device='cpu', ax=None):
+def plot_latent_std_background(decoder, grid_size=100, z1_range=(-6, 6), z2_range=(-6, 6), device='cpu', ax=None):
     """
     Plot background of std dev of decoder output over a latent grid.
-    
-    mainly a courtesy of chatgpt
     """
     if ax is None:
         fig, ax = plt.subplots()
 
     # Generate grid
-    lin = torch.linspace(-zlim, zlim, grid_size)
-    zz1, zz2 = torch.meshgrid(lin, lin, indexing='ij')
-    grid = torch.stack([zz1.reshape(-1), zz2.reshape(-1)], dim=1).to(device)  # shape: (grid_size**2, 2)
+    lin_z1 = torch.linspace(z1_range[0], z1_range[1], grid_size)
+    lin_z2 = torch.linspace(z2_range[0], z2_range[1], grid_size)
+    zz1, zz2 = torch.meshgrid(lin_z1, lin_z2, indexing='ij')
+    grid = torch.stack([zz1.reshape(-1), zz2.reshape(-1)], dim=1).to(device)
 
     with torch.no_grad():
         out = decoder(grid).mean  # (N, 1, 28, 28)
@@ -198,16 +193,68 @@ def plot_latent_std_background(decoder, grid_size=100, zlim=6, device='cpu', ax=
 
     # Plot heatmap
     im = ax.imshow(
-        std_map.T,
+        std_map,
         origin='lower',
-        extent=[-zlim, zlim, -zlim, zlim],
+        extent=[z1_range[0], z1_range[1], z2_range[0], z2_range[1]],
+        cmap='viridis',
+        aspect='auto'  # allow full fill of plot area
+    )
+
+    ax.set_xlim(z1_range)
+    ax.set_ylim(z2_range)
+    # Colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Standard deviation of pixel values')
+
+    return ax
+
+def plot_latent_std_background_across_decoders(decoders, grid_size=100, z1_range=(-10, 10), z2_range=(-10, 10), device='cpu', ax=None):
+    """
+    Plot background of std dev of decoder outputs across multiple decoders for the same latent points.
+    
+    Args:
+        decoders: List of decoder networks (e.g., 10 decoders).
+        grid_size: Size of the latent grid.
+        z1_range, z2_range: Ranges for the latent dimensions.
+        device: Device to perform computations on.
+        ax: Matplotlib axis for plotting (optional).
+    """
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    # Generate grid
+    lin_z1 = torch.linspace(z1_range[0], z1_range[1], grid_size)
+    lin_z2 = torch.linspace(z2_range[0], z2_range[1], grid_size)
+    zz1, zz2 = torch.meshgrid(lin_z1, lin_z2, indexing='ij')
+    grid = torch.stack([zz1.reshape(-1), zz2.reshape(-1)], dim=1).to(device)  # Shape: (N, 2), N = grid_size * grid_size
+
+    num_decoders = len(decoders)
+    N = grid_size * grid_size
+
+    with torch.no_grad():
+        # Decode grid with all decoders
+        decoder_outputs = torch.stack([decoder(grid).mean for decoder in decoders], dim=1)  # Shape: (N, num_decoders, 1, 28, 28)
+        decoder_outputs = decoder_outputs.squeeze(2)  # Shape: (N, num_decoders, 28, 28)
+
+        # Compute standard deviation across decoders for each pixel, then mean over pixels
+        std_across_decoders = decoder_outputs.std(dim=1)  # Shape: (N, 28, 28), std over num_decoders
+        std_map = std_across_decoders.mean(dim=(1, 2)).cpu().numpy()  # Shape: (N,), mean std over pixels
+
+    std_map = std_map.reshape(grid_size, grid_size)
+
+    # Plot heatmap
+    im = ax.imshow(
+        std_map,
+        origin='lower',
+        extent=[z1_range[0], z1_range[1], z2_range[0], z2_range[1]],
         cmap='viridis',
         aspect='auto'
     )
 
-    # Colorbar
+    ax.set_xlim(z1_range)
+    ax.set_ylim(z2_range)
     cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label('Standard deviation of pixel values')
+    cbar.set_label('Mean Std Dev Across Decoders')
 
     return ax
 
@@ -266,3 +313,189 @@ def compute_length(decoder, curve):
         # Compute length increment
         length += torch.sqrt(delta @ G @ delta).item()
     return length
+
+def model_average_energy(c, decoders, num_samples=10):
+    """
+    Compute the model-average curve energy using Monte Carlo sampling, keeping gradients.
+    
+    Args:
+        c: torch.Tensor of shape (N+1, M), the discretized curve in latent space.
+        decoders: List of decoder models (ensemble members).
+        num_samples: Number of Monte Carlo samples (decoder pairs) per segment.
+    
+    Returns:
+        energy: torch.Tensor (scalar), the approximated model-average energy.
+    """
+    N = len(c) - 1  # Number of segments
+    energy = torch.tensor(0.0, device=c.device, requires_grad=True)
+    
+    for i in range(N):
+        segment_energy = torch.tensor(0.0, device=c.device)
+        z_i = c[i].unsqueeze(0)      # Shape: (1, M)
+        z_ip1 = c[i+1].unsqueeze(0)  # Shape: (1, M)
+        
+        # Monte Carlo sampling over decoder pairs
+        for _ in range(num_samples):
+            fl = random.choice(decoders)
+            fk = random.choice(decoders)
+            
+            f1 = fl(z_i).mean.view(-1)    # Shape: (D,)
+            f2 = fk(z_ip1).mean.view(-1)  # Shape: (D,)
+            squared_diff = torch.norm(f1 - f2) ** 2
+            segment_energy = segment_energy + squared_diff
+        
+        # Average over samples for this segment
+        segment_energy = segment_energy / num_samples
+        energy = energy + segment_energy
+    
+    return energy
+
+# def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energy_fn):
+#     """
+#     Optimize a geodesic curve between z_start and z_end by minimizing the given energy function.
+    
+#     Args:
+#         decoders: List of decoder models (ensemble members) or a single decoder.
+#         z_start: torch.Tensor of shape (M,), starting point in latent space.
+#         z_end: torch.Tensor of shape (M,), ending point in latent space.
+#         num_points: int, number of points along the curve (including endpoints).
+#         num_iters: int, number of optimization iterations.
+#         lr: float, learning rate for the optimizer.
+#         energy_fn: Callable, function that computes the energy of the curve.
+#                   Takes a curve (tensor of shape (num_points, M)) and decoders as input.
+    
+#     Returns:
+#         curve: torch.Tensor of shape (num_points, M), the optimized geodesic curve.
+#     """
+#     # Ensure z_start and z_end are on the correct device and have the right shape
+#     device = z_start.device
+#     M = z_start.shape[0]  # Latent dimension
+    
+#     # Initialize the curve as a straight line from z_start to z_end
+#     t = torch.linspace(0, 1, num_points, device=device)  # Shape: (num_points,)
+#     t = t.unsqueeze(-1)  # Shape: (num_points, 1)
+#     z_start = z_start.unsqueeze(0)  # Shape: (1, M)
+#     z_end = z_end.unsqueeze(0)  # Shape: (1, M)
+#     curve = (1 - t) * z_start + t * z_end  # Shape: (num_points, M)
+    
+#     # Extract intermediate points as a separate leaf tensor for optimization
+#     intermediate_points = curve[1:-1].clone().detach().requires_grad_(True)  # Shape: (num_points-2, M)
+    
+#     # Optimizer: optimize only the intermediate points
+#     optimizer = torch.optim.Adam([intermediate_points], lr=lr)
+    
+#     # Optimization loop with tqdm progress bar
+#     with tqdm(range(num_iters), desc="Optimizing geodesic") as pbar:
+#         for step in pbar:
+#             optimizer.zero_grad()
+            
+#             # Reconstruct the full curve with fixed endpoints
+#             curve = torch.cat([
+#                 z_start,  # Fixed start
+#                 intermediate_points,  # Trainable intermediate points
+#                 z_end  # Fixed end
+#             ], dim=0)  # Shape: (num_points, M)
+            
+#             # Compute the energy
+#             energy = energy_fn(curve)
+            
+#             # Backward pass
+#             energy.backward()
+            
+#             # Update the intermediate points
+#             optimizer.step()
+            
+#             # Update tqdm description with current energy
+#             pbar.set_description(f"Optimizing geodesic, Energy: {energy.item():.4f}")
+    
+#     # Final curve with fixed endpoints
+#     final_curve = torch.cat([
+#         z_start,
+#         intermediate_points.detach(),
+#         z_end
+#     ], dim=0)
+    
+#     # Compute and print the final energy
+#     final_energy = energy_fn(final_curve)
+#     print(f"Final energy after optimization: {final_energy.item():.4f}")
+    
+#     return final_curve
+
+def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energy_fn, convergence_threshold=1e-3, window_size=10):
+    device = z_start.device
+    M = z_start.shape[0]
+    
+    t = torch.linspace(0, 1, num_points, device=device).unsqueeze(-1)
+    z_start = z_start.unsqueeze(0)
+    z_end = z_end.unsqueeze(0)
+    curve = (1 - t) * z_start + t * z_end
+    
+    intermediate_points = curve[1:-1].clone().detach().requires_grad_(True)
+    optimizer = torch.optim.Adam([intermediate_points], lr=lr)
+    
+    energy_history = []
+    curve_changes = []  # Track changes in the curve
+    
+    with tqdm(range(num_iters), desc="Optimizing geodesic") as pbar:
+        for step in pbar:
+            optimizer.zero_grad()
+            curve = torch.cat([z_start, intermediate_points, z_end], dim=0)
+            energy = energy_fn(curve)
+            energy_history.append(energy.item())
+            
+            # Compute change in intermediate points
+            if step > 0:
+                change = torch.norm(intermediate_points - prev_intermediate_points).item()
+                curve_changes.append(change)
+            prev_intermediate_points = intermediate_points.clone().detach()
+            
+            energy.backward()
+            torch.nn.utils.clip_grad_norm_([intermediate_points], max_norm=1.0)
+            optimizer.step()
+            
+            pbar.set_description(f"Optimizing geodesic, Energy: {energy.item():.4f}")
+            
+            if len(energy_history) >= window_size:
+                recent_energies = energy_history[-window_size:]
+                moving_avg = np.mean(recent_energies)
+                if len(energy_history) >= 2 * window_size:
+                    prev_energies = energy_history[-2*window_size:-window_size]
+                    prev_moving_avg = np.mean(prev_energies)
+                    if prev_moving_avg > 0:
+                        relative_change = abs(moving_avg - prev_moving_avg) / prev_moving_avg
+                        if relative_change < convergence_threshold:
+                            print(f"Converged at step {step+1}/{num_iters}, "
+                                  f"Relative change in moving average: {relative_change:.6f}")
+                            break
+    
+    final_curve = torch.cat([z_start, intermediate_points.detach(), z_end], dim=0)
+    final_energy = energy_fn(final_curve)
+    print(f"Final energy after optimization: {final_energy.item():.4f}")
+    
+    # Plot energy history
+    plt.figure(figsize=(8, 4))
+    plt.plot(energy_history, label='Energy', alpha=0.5)
+    if len(energy_history) >= window_size:
+        moving_avg = np.convolve(energy_history, np.ones(window_size)/window_size, mode='valid')
+        plt.plot(range(window_size-1, len(energy_history)), moving_avg, label='Moving Average', color='red')
+    plt.xlabel('Iteration')
+    plt.ylabel('Energy')
+    plt.title('Energy During Geodesic Optimization')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(f"energy_history_geodesic_{id(final_curve)}.png")
+    plt.show()
+    
+    # Plot curve changes
+    if curve_changes:
+        plt.figure(figsize=(8, 4))
+        plt.plot(curve_changes, label='Curve Change (L2 Norm)')
+        plt.xlabel('Iteration')
+        plt.ylabel('Change in Intermediate Points')
+        plt.title('Curve Changes During Geodesic Optimization')
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(f"curve_changes_geodesic_{id(final_curve)}.png")
+        plt.show()
+    
+    return final_curve

@@ -7,21 +7,18 @@
 # Significant extension by Søren Hauberg, 2024
 
 # To run it
-# python Project2bis_ensemble_vae.py geodesics --device cuda --num-curves 25 --num-t 15 --num-decoders 10
+# python Project2bis_ensemble_vae.py geodesics --device cuda --num-curves 25 --num-t 15 --num-decoders 10 --num-iters 50 --lr 1e-2
 # To test it
-# python Project2bis_ensemble_vae.py geodesics --device cuda --num-curves 2 --num-t 3 --num-decoders 2
+# python Project2bis_ensemble_vae.py geodesics --device cuda --num-curves 2 --num-t 3 --num-decoders 2 --num-iters 50 --lr 1e-2
 # To save an image:
 # save_image(torch.cat([data.cpu(), recon.cpu()], dim=0), "something.png")
-# TODO: Add all the 2048 points 
-
 
 # To run it
-# python Project2bis_ensemble_vae.py cov_plot --device cuda --num-curves 25 --num-t 15 --num-decoders 10
+# python Project2bis_ensemble_vae.py cov_plot --device cuda --num-curves 25 --num-t 15 --num-decoders 10 --num-iters 50 --lr 1e-2
 # To test it
-# python Project2bis_ensemble_vae.py cov_plot --device cuda --num-curves 2 --num-t 3 --num-decoders 2
+# python Project2bis_ensemble_vae.py cov_plot --device cuda --num-curves 2 --num-t 3 --num-decoders 2 --num-iters 50 --lr 1e-2
 # To save an image:
 # save_image(torch.cat([data.cpu(), recon.cpu()], dim=0), "something.png")
-# TODO: Add all the 2048 points 
 
 import torch
 import torch.nn as nn
@@ -31,7 +28,7 @@ from tqdm import tqdm
 from copy import deepcopy
 import os
 import matplotlib.pyplot as plt
-from geodesics_utilsbis import optimize_geodesic, plot_geodesic_latents,plot_decoded_images,plot_latent_std_background,compute_curve_energies, compute_energy, compute_length
+from geodesics_utilsbis import optimize_geodesic, plot_geodesic_latents,plot_decoded_images,plot_latent_std_background,compute_curve_energies, compute_energy, compute_length, model_average_energy
 
 
 
@@ -310,6 +307,21 @@ if __name__ == "__main__":
         help="number of points along the curve (default: %(default)s)",
     )
 
+    parser.add_argument(
+        "--num-iters",  # number of points along the curve
+        type=int,
+        default=50,
+        metavar="N",
+        help="number of iterations to optimize the geodesic (default: %(default)s)",
+    )
+
+    parser.add_argument(
+        "--lr",  # number of points along the curve
+        type=float,
+        default=1e-3,
+        help="learning rate to use for optimization of the geodesic (default: %(default)s)",
+    )
+
     args = parser.parse_args()
     print("# Options")
     for key, value in sorted(vars(args).items()):
@@ -399,7 +411,7 @@ if __name__ == "__main__":
                 GaussianDecoder(new_decoder()),
                 GaussianEncoder(new_encoder()),
             ).to(device)
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
             train(
                 model,
                 optimizer,
@@ -451,9 +463,9 @@ if __name__ == "__main__":
     # --------------- Geodesics -------------------
     
     elif args.mode == "geodesics":
-        
-        import random
-        
+        import matplotlib.lines as mlines
+
+        # Load all decoders
         decoders = []
         for i in range(args.num_decoders):
             model = VAE(
@@ -465,107 +477,170 @@ if __name__ == "__main__":
             model.eval()
             decoders.append(model.decoder)
 
-        
-        N = args.num_t
-        t = torch.linspace(0, 1, N+1)
-        def Epsilon(c, decoders):
-            fl = random.choice(decoders)
-            fk = random.choice(decoders)
-            
-            energy = 0.0
-            for i in range(N+1):
-                f1 = fl(c[i].unsqueeze(0)).mean.view(-1)
-                f2 = fk(c[i+1].unsqueeze(0)).mean.view(-1)
-                energy += torch.norm(f1 - f2)**2
-            return energy / N
-        
-        
+        # Load latent pairs
         latent_pairs = torch.load(os.path.join(args.experiment_folder, "latent_pairs.pt"))
         geodesics = []
-        
+
+        # Compute geodesics for each pair
         for curve_idx, (z1, z2) in enumerate(latent_pairs):
-            print(f"Computing ensemble geodesic #{curve_idx+1}")
+            print(f"Computing ensemble geodesic #{curve_idx+1}/{len(latent_pairs)}")
             geodesic = optimize_geodesic(
-                decoders=decoders, z_start=z1, z_end=z2, num_points=args.num_t, num_iters=50, lr=1e-2, energy_fn=Epsilon
+                decoders=decoders,
+                z_start=z1,
+                z_end=z2,
+                num_points=args.num_t,
+                num_iters=args.num_iters,
+                lr=args.lr,
+                energy_fn=lambda c: model_average_energy(c, decoders, num_samples=50),
+                convergence_threshold=1e-3,
+                window_size=10
             )
             geodesics.append(geodesic)
-            
-        fig, ax = plt.subplots()
-        # scatter all latent points
-        ax.scatter(latent_pairs[:, 0], latent_pairs[:, 1], alpha=0.3)
 
-        # for each pair
-        for z1, z2 in latent_pairs:
-            geod = optimize_geodesic(z1, z2, decoders=decoders, energy_fn=Epsilon)
-            plot_geodesic_latents(geod, ax=ax)
+        # Plotting
+        fig, ax = plt.subplots(figsize=(6, 6))
 
-        plt.title("Latent space with ensemble geodesics")
+        # Get all latent points from latent_pairs
+        all_latents = torch.stack([z for pair in latent_pairs for z in pair])  # Shape: (2*num_pairs, M)
+
+        # Compute the range for the plot with padding
+        z1_min, z1_max = all_latents[:, 0].min().item(), all_latents[:, 0].max().item()
+        z2_min, z2_max = all_latents[:, 1].min().item(), all_latents[:, 1].max().item()
+        padding = 0.7
+        zlim = {
+            'z1': (z1_min - padding, z1_max + padding),
+            'z2': (z2_min - padding, z2_max + padding)
+        }
+
+        # Plot background with standard deviation of decoder output (using the first decoder)
+        plot_latent_std_background(
+            decoders[0], ax=ax, device=device,
+            z1_range=zlim['z1'], z2_range=zlim['z2']
+        )
+
+        # Scatter plot: all latent points (without class labels for simplicity)
+        ax.scatter(all_latents[:, 0].cpu(), all_latents[:, 1].cpu(), s=10, alpha=0.6, color='gray', label='Latent Points')
+
+        # Plot geodesics
+        colors = ['C0', 'C1']
+        for i, geod in enumerate(geodesics):
+            geod_cpu = geod.cpu()  # Move to CPU for plotting
+            plot_geodesic_latents(geod_cpu, ax=ax, color=colors[i % len(colors)], label_once=(i != 0))
+
+        # Legend
+        line_geod = mlines.Line2D([], [], color='C0', lw=2, label='Pullback geodesic')
+        line_straight = mlines.Line2D([], [], color='C0', lw=2, linestyle='--', alpha=0.6, label='Straight line')
+        ax.legend(loc='best', fontsize=8, frameon=True)
+
+        ax.set_title("Multiple Geodesics in Latent Space (Model-Average Energy)")
+        ax.set_aspect('auto')
+        plt.tight_layout()
+        plt.savefig("geodesic_plot_model_average.png")
         plt.show()
 
     elif args.mode == "cov_plot":
-        import random
-
-        decoder_counts = [1, 2, 3, 5, 10]  # Try different ensemble sizes
-        cov_geo_list = []
-        cov_euc_list = []
-
+        decoder_counts = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] # Try different ensemble sizes
+        cov_geo_list = [] # Ensemble CoV
+        cov_euc_list = [] # Euclidean CoV
+        cov_single_list = [] # Single decoder CoV
+        
         # Load all decoders once
         all_decoders = []
-        for i in range(args.num_deocders):
+        for i in range(args.num_decoders):
             model = VAE(
                 GaussianPrior(M),
                 GaussianDecoder(new_decoder()),
                 GaussianEncoder(new_encoder()),
             ).to(device)
-            model.load_state_dict(torch.load(f"{args.experiment_folder}/model_{args.num_deocders}decoders_{i}.pt"))
+            model.load_state_dict(torch.load(f"{args.experiment_folder}/model_{args.num_decoders}decoders_{i}.pt"))
             model.eval()
             all_decoders.append(model.decoder)
-
-        # Load same latent pairs (e.g. 10)
+        
+        # Load latent pairs
         latent_pairs = torch.load(os.path.join(args.experiment_folder, "latent_pairs.pt"))
-        latent_pairs = latent_pairs[:10]
+        print(f"Number of latent pairs: {len(latent_pairs)}")
+        
+        # Single decoder CoV computation with multiple geodesic computations
+        # single_decoder = all_decoders[0]
+        # single_pair_covs = []
 
-        for num_dec in decoder_counts:
-            dec_subset = all_decoders[:num_dec] # Select first num_dec decoders from the full ensemble
+        # print("\n--- Computing CoV for Single Decoder ---")
+        # for z1, z2 in latent_pairs:
+        #     # Compute multiple geodesics for the same latent pair
+        #     multiple_lengths = []
+        #     for i in range(10):  # Can adjust number of iterations
+        #         print(f"Iteration n. {i+1}")
+        #         geod = optimize_geodesic(
+        #             single_decoder, z1, z2, 
+        #             num_points=args.num_t, 
+        #             num_iters=args.num_iters, 
+        #             lr=args.lr
+        #         )
+        #         length = compute_length(single_decoder, geod)
+        #         multiple_lengths.append(length)
             
-            # collect energy values and Euclidean distances for all pairs
-            geo_energies = []
+        #     # Compute CoV for this specific latent pair
+        #     length_tensor = torch.tensor(multiple_lengths)
+        #     pair_cov = (length_tensor.std() / length_tensor.mean()).item()
+        #     single_pair_covs.append(pair_cov)
+            
+        #     print(f"Latent pair CoV: {pair_cov:.4f}")
+        #     print(f"Lengths: {multiple_lengths}")
+
+        # # Average CoV across all latent pairs
+        # cov_single = np.mean(single_pair_covs)
+        # print(f"Single Decoder Average CoV: {cov_single:.4f}")
+
+        # # Store for plotting (optional)
+        # cov_single_list = [cov_single] * len(decoder_counts)
+
+        # Existing ensemble computation
+        for num_dec in decoder_counts:
+            dec_subset = all_decoders[:num_dec]
+            print(f"\n--- Analyzing {num_dec} Decoders ---")
+            geo_lengths = []
             euc_dists = []
-
+            
             for z1, z2 in latent_pairs:
-                # Compute geodesic energies
-                curve_set = [] 
+                print(f"Processing latent pair: z1={z1}, z2={z2}")
+                pair_lengths = []
                 
-                # find geodesic for latent pair for each decoder
                 for dec in dec_subset:
-                    geod = optimize_geodesic(dec, z1, z2, num_points=args.num_t, num_iters=30, lr=1e-2)
-                    curve_set.append(geod)
-                curve_energies = [compute_energy(dec, geod).item() for dec, geod in zip(dec_subset, curve_set)]
-                geo_energies.append(curve_energies)
-
-                # Euclidean norm (same across decoders)
+                    geod = optimize_geodesic(
+                        dec, z1, z2, num_points=args.num_t, num_iters=args.num_iters, lr=args.lr
+                    )
+                    length = compute_length(dec, geod)
+                    pair_lengths.append(length)
+                    print(f" Decoder length: {length}")
+                
+                geo_lengths.append(pair_lengths)
                 euc = torch.norm(z2 - z1).item()
                 euc_dists.append(euc)
-
-            # CoV for geodesics
-            geo_tensor = torch.tensor(geo_energies)  # shape: (num_pairs, num_dec)
+                print(f" Euclidean distance: {euc}")
+            
+            # Ensemble CoV
+            geo_tensor = torch.tensor(geo_lengths) # (num_pairs, num_dec)
             cov_geo = (geo_tensor.std(dim=1) / geo_tensor.mean(dim=1)).mean().item()
             cov_geo_list.append(cov_geo)
-
-            # CoV for Euclidean = 0 (no variation), but still include for symmetry
-            cov_euc_list.append(0.0)
-
             print(f"{num_dec} decoders -> Geodesic CoV: {cov_geo:.4f}")
+            
+            # Euclidean CoV
+            euclidean_dists = torch.tensor(euc_dists)
+            cov_euclidean = (euclidean_dists.std() / euclidean_dists.mean()).item()
+            cov_euc_list.append(cov_euclidean)
+            print(f"{num_dec} decoders -> Euclidean CoV: {cov_euclidean:.4f}")
 
         # Plot
-        plt.plot(decoder_counts, cov_geo_list, marker='o', label='Geodesic CoV')
+        plt.plot(decoder_counts, cov_geo_list, marker='o', label='Ensemble Geodesic CoV')
         plt.plot(decoder_counts, cov_euc_list, marker='x', label='Euclidean CoV')
-        plt.xlabel("Number of decoders")
-        plt.ylabel("Average CoV across 10 pairs")
+        # plt.plot(decoder_counts, cov_single_list, marker='s', label='Single Decoder CoV')
+        plt.xlabel("Number of Decoders")
+        plt.ylabel("Average CoV across Pairs")
         plt.title("Coefficient of Variation vs Ensemble Size")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
+        plt.savefig("cov_plot_with_single.png")
         plt.show()
 
     
@@ -609,7 +684,7 @@ if __name__ == "__main__":
     #                 z1 = encoder(x1).mean.squeeze(0)
     #                 z2 = encoder(x2).mean.squeeze(0)
 
-    #             geod = optimize_geodesic(decoder, z1, z2, num_points=num_t, num_iters=50, lr=1e-2)
+    #             geod = optimize_geodesic(decoder, z1, z2, num_points=num_t, num_iters=args.num_iters, lr=args.lr)
     #             curve_set.append(geod)
 
     #         geodesics_all.append(curve_set)
@@ -624,7 +699,7 @@ if __name__ == "__main__":
 
     #     energies_tensor = torch.tensor(energies)  # shape: (num_curves, num_decoders)
     #     avg_energies = energies_tensor.mean(dim=1)
-    #     std_energies = energies_tensor.std(dim=1)
+    #     std_energ ies = energies_tensor.std(dim=1)
     #     cov_geodesic = (std_energies / avg_energies).mean().item()
     #     mean_energy = avg_energies.mean().item()
 
@@ -697,7 +772,7 @@ if __name__ == "__main__":
                     z1 = encoder(x1).mean.squeeze(0)
                     z2 = encoder(x2).mean.squeeze(0)
 
-                geod = optimize_geodesic(decoder, z1, z2, num_points=num_t, num_iters=50, lr=1e-2)
+                geod = optimize_geodesic(decoder, z1, z2, num_points=num_t, num_iters=args.num_iters, lr=args.lr)
                 curve_set.append(geod)
 
             geodesics_all.append(curve_set)
@@ -774,7 +849,7 @@ if __name__ == "__main__":
 
             curve_set = []
             for decoder in decoders:
-                geod = optimize_geodesic(decoder, z1, z2, num_points=num_t, num_iters=50, lr=1e-2)
+                geod = optimize_geodesic(decoder, z1, z2, num_points=num_t, num_iters=args.num_iters, lr=args.lr)
                 curve_set.append(geod)
             geodesics_all.append(curve_set)
 

@@ -1,6 +1,7 @@
 import torch
 from torch.autograd.functional import jacobian
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 def compute_decoder_jacobian(decoder, z):
     """
@@ -46,6 +47,8 @@ def compute_pullback_metric(decoder, z):
 
 
 
+from tqdm import tqdm
+
 def compute_energy(decoder, curve_points):
     """
     Computes discrete energy of a curve under pullback metric.
@@ -83,30 +86,30 @@ def optimize_geodesic(decoder, z_start, z_end, num_points=10, num_iters=500, lr=
     M = z_start.shape[-1]
     
     # Initialize intermediate points
-    # we use torch.no_grad() to disable gradient tracking for the initialization
     with torch.no_grad(): 
-        # Inital guess: straight line from z_start to z_end
+        # Initial guess: straight line from z_start to z_end
         inits = [z_start + (i / (num_points - 1)) * (z_end - z_start) for i in range(num_points)]
     intermediates = [torch.nn.Parameter(p.clone()) for p in inits[1:-1]] # exclude endpoints
     
     optimizer = torch.optim.Adam(intermediates, lr=lr) # optimizer for the intermediate points
 
     # Find geodesic with minimum energy
-    for _ in range(num_iters):
+    for _ in tqdm(range(num_iters), desc="Optimizing geodesic"):
         optimizer.zero_grad()
         curve = [z_start] + intermediates + [z_end] # make the curve by concatenating all points
         energy = compute_energy(decoder, curve) # energy is differentiable w.r.t. intermediate points
         
-        # compute the gradient of the energy (that is dependent the jacobian of the decoder) 
-        # so that the optimizer can update the intermediate points by moving them in the 
-        # direction of the negative gradient
+        # compute the gradient of the energy
         energy.backward() 
         
-        # we take the step in that negative gradient direction
+        # take the step in the negative gradient direction
         optimizer.step()
 
     with torch.no_grad():
         curve = [z_start] + [p.clone() for p in intermediates] + [z_end]
+        final_energy = compute_energy(decoder, curve)
+        print(f"Final energy after optimization: {final_energy.item():.6f}")
+    
     return curve
 
 
