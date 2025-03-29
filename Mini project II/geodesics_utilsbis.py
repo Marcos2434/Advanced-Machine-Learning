@@ -115,39 +115,59 @@ def compute_length(decoder, curve):
     
     return length
 
-def plot_geodesic_latents(geodesic, ax=None, color='C0', show_endpoints=True, label_once=False):
-    """
-    Plot Geodesic in Latent Space
+# def plot_geodesic_latents(geodesic, ax=None, color='C0', show_endpoints=True, label_once=False):
+#     """
+#     Plot Geodesic in Latent Space
     
-    mainly a courtesy of chatgpt
+#     mainly a courtesy of chatgpt
+#     """
+#     if ax is None:
+#         fig, ax = plt.subplots()
+
+#     # geodesic is already a tensor of shape (num_points, M), no need to stack
+#     points = geodesic.detach().cpu().numpy()  # Shape: (num_points, M)
+#     z1, z2 = points[:, 0], points[:, 1]  # points of the geodesic in latent space
+
+#     # Add labels only for first call if label_once=True
+#     geodesic_label = 'Pullback geodesic' if not label_once else None
+#     straight_label = 'Straight line' if not label_once else None
+
+#     # Plot geodesic curve (solid)
+#     ax.plot(z1, z2, '-', lw=2, color=color, label=geodesic_label)
+
+#     # Plot straight line between endpoints (dashed)
+#     ax.plot([z1[0], z1[-1]], [z2[0], z2[-1]], '--', color=color, alpha=0.5, label=straight_label)
+
+#     # Optionally mark endpoints
+#     if show_endpoints:
+#         ax.plot(z1[0], z2[0], 'o', color=color)
+#         ax.plot(z1[-1], z2[-1], 'x', color=color)
+
+#     ax.set_xlabel('z1')
+#     ax.set_ylabel('z2')
+#     ax.set_title('Geodesic in Latent Space')
+#     ax.axis('equal')
+#     ax.grid(True)
+
+def plot_geodesic_latents(geodesic, ax, color='blue', label_once=False, alpha=0.8):
     """
-    if ax is None:
-        fig, ax = plt.subplots()
-
-    # geodesic is already a tensor of shape (num_points, M), no need to stack
-    points = geodesic.detach().cpu().numpy()  # Shape: (num_points, M)
-    z1, z2 = points[:, 0], points[:, 1]  # points of the geodesic in latent space
-
-    # Add labels only for first call if label_once=True
-    geodesic_label = 'Pullback geodesic' if not label_once else None
-    straight_label = 'Straight line' if not label_once else None
-
-    # Plot geodesic curve (solid)
-    ax.plot(z1, z2, '-', lw=2, color=color, label=geodesic_label)
-
-    # Plot straight line between endpoints (dashed)
-    ax.plot([z1[0], z1[-1]], [z2[0], z2[-1]], '--', color=color, alpha=0.5, label=straight_label)
-
-    # Optionally mark endpoints
-    if show_endpoints:
-        ax.plot(z1[0], z2[0], 'o', color=color)
-        ax.plot(z1[-1], z2[-1], 'x', color=color)
-
-    ax.set_xlabel('z1')
-    ax.set_ylabel('z2')
-    ax.set_title('Geodesic in Latent Space')
-    ax.axis('equal')
-    ax.grid(True)
+    Plot a geodesic curve in latent space with enhanced styling.
+    """
+    # Extract x and y coordinates
+    x = geodesic[:, 0].numpy()
+    y = geodesic[:, 1].numpy()
+    
+    # Plot the actual geodesic curve
+    ax.plot(x, y, '-', color=color, linewidth=2.5, alpha=alpha, 
+            label='Pullback geodesic' if not label_once else None)
+    
+    # Plot the straight line connecting start and end points
+    ax.plot([x[0], x[-1]], [y[0], y[-1]], '--', color=color, linewidth=1.8, 
+            alpha=0.5, label='Straight line' if not label_once else None)
+    
+    # Mark the start and end points
+    ax.scatter([x[0]], [y[0]], color=color, s=50, marker='o', edgecolor='black', linewidth=0.8)
+    ax.scatter([x[-1]], [y[-1]], color=color, s=50, marker='o', edgecolor='black', linewidth=0.8)
 
 def plot_decoded_images(decoder, geodesic):
     """
@@ -343,7 +363,7 @@ def model_average_energy(c, decoders, num_samples=10):
     
     return energy
 
-def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energy_fn, convergence_threshold=1e-3, window_size=10):
+def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energy_fn, convergence_threshold=1e-3, window_size=10, plot=False):
     device = z_start.device
     M = z_start.shape[0]
     
@@ -395,29 +415,91 @@ def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energ
     print(f"Final energy after optimization: {final_energy.item():.4f}")
     
     # Plot energy history
-    plt.figure(figsize=(8, 4))
-    plt.plot(energy_history, label='Energy', alpha=0.5)
-    if len(energy_history) >= window_size:
-        moving_avg = np.convolve(energy_history, np.ones(window_size)/window_size, mode='valid')
-        plt.plot(range(window_size-1, len(energy_history)), moving_avg, label='Moving Average', color='red')
-    plt.xlabel('Iteration')
-    plt.ylabel('Energy')
-    plt.title('Energy During Geodesic Optimization')
-    plt.grid(True)
-    plt.legend()
-    plt.savefig(f"energy_history_geodesic_{id(final_curve)}.png")
-    plt.show()
-    
-    # Plot curve changes
-    if curve_changes:
+    if plot:
         plt.figure(figsize=(8, 4))
-        plt.plot(curve_changes, label='Curve Change (L2 Norm)')
+        plt.plot(energy_history, label='Energy', alpha=0.5)
+        if len(energy_history) >= window_size:
+            moving_avg = np.convolve(energy_history, np.ones(window_size)/window_size, mode='valid')
+            plt.plot(range(window_size-1, len(energy_history)), moving_avg, label='Moving Average', color='red')
         plt.xlabel('Iteration')
-        plt.ylabel('Change in Intermediate Points')
-        plt.title('Curve Changes During Geodesic Optimization')
+        plt.ylabel('Energy')
+        plt.title('Energy During Geodesic Optimization')
         plt.grid(True)
         plt.legend()
-        plt.savefig(f"curve_changes_geodesic_{id(final_curve)}.png")
+        plt.savefig(f"energy_history_geodesic_{id(final_curve)}.png")
         plt.show()
     
+        # Plot curve changes
+        if curve_changes:
+            plt.figure(figsize=(8, 4))
+            plt.plot(curve_changes, label='Curve Change (L2 Norm)')
+            plt.xlabel('Iteration')
+            plt.ylabel('Change in Intermediate Points')
+            plt.title('Curve Changes During Geodesic Optimization')
+            plt.grid(True)
+            plt.legend()
+            plt.savefig(f"curve_changes_geodesic_{id(final_curve)}.png")
+            plt.show()
+    
     return final_curve
+
+# Helper function to compute the metric determinant for a single decoder
+def compute_metric_determinant(decoder, z_grid, device):
+    """
+    Compute the determinant of the pullback metric G at each point in z_grid.
+    Decoder outputs an Independent Normal distribution.
+    """
+    z_grid = z_grid.to(device).requires_grad_(True)  # Enable gradients from the start
+    decoder.eval()
+    # Compute the distribution and extract the mean with gradients
+    dist = decoder(z_grid)  # Independent Normal distribution
+    outputs = dist.base_dist.loc  # Shape: (n_points, 1, 28, 28) for MNIST
+    outputs_flat = outputs.view(outputs.size(0), -1)  # Flatten to (n_points, 784)
+
+    # Compute the Jacobian in batches to reduce memory usage
+    n_points, output_dim = outputs_flat.shape  # (n_points, 784)
+    batch_size = 64  # Process 64 output dimensions at a time
+    J = torch.zeros(n_points, output_dim, 2, device=device)  # Shape: (n_points, 784, 2)
+
+    for start_idx in range(0, output_dim, batch_size):
+        end_idx = min(start_idx + batch_size, output_dim)
+        batch_size_current = end_idx - start_idx
+        outputs_batch = outputs_flat[:, start_idx:end_idx]  # Shape: (n_points, batch_size_current)
+
+        # Compute gradients for each output dimension in the batch
+        grad_batch = torch.zeros(n_points, batch_size_current, 2, device=device)
+        for i in range(batch_size_current):
+            grad_outputs = torch.ones(n_points, device=device)  # Shape: (n_points,)
+            grad = torch.autograd.grad(outputs_batch[:, i], z_grid, 
+                                       grad_outputs=grad_outputs, 
+                                       create_graph=False, 
+                                       retain_graph=True)[0]  # Shape: (n_points, 2)
+            grad_batch[:, i, :] = grad
+
+        J[:, start_idx:end_idx, :] = grad_batch  # Shape: (n_points, batch_size_current, 2)
+        # Clear intermediate tensors to free memory
+        del grad_batch, outputs_batch
+        torch.cuda.empty_cache()
+
+    # Compute the pullback metric G = J^T J
+    G = torch.bmm(J.transpose(1, 2), J)  # (n_points, 2, 784) @ (n_points, 784, 2) -> (n_points, 2, 2)
+    det_G = torch.det(G).detach().cpu().numpy()  # Detach and convert to numpy
+    z_grid.requires_grad_(False)  # Clean up
+    del J, G
+    torch.cuda.empty_cache()
+    return det_G
+
+# Helper function to compute standard deviation across ensemble decoders
+def compute_ensemble_std(decoders, z_grid, device):
+    z_grid = z_grid.to(device)
+    outputs = []
+    for decoder in decoders:
+        decoder.eval()
+        with torch.no_grad():  # No gradients needed for std computation
+            dist = decoder(z_grid)  # Independent Normal distribution
+            out = dist.base_dist.loc  # Use mean of the Normal distribution
+            out_flat = out.view(out.size(0), -1)  # Flatten to (n_points, 784)
+            outputs.append(out_flat.cpu().numpy())
+    outputs = np.stack(outputs, axis=0)  # Shape: (num_decoders, n_points, 784)
+    std = np.std(outputs, axis=0)  # Std across decoders: (n_points, 784)
+    return std.mean(axis=1)  # Average std over pixels: (n_points,)
