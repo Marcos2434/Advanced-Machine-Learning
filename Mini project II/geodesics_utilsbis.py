@@ -9,115 +9,111 @@ import random
 def compute_decoder_jacobian(decoder, z):
     """
     Computes the Jacobian of the decoder mean at point z.
-    Args:
-        decoder: torch.nn.Module, maps z -> f(z) in R^D
-        z: torch.Tensor of shape (M,) or (1, M)
-    Returns:
-        J: jacobian, torch.Tensor of shape (D, M)
-    """
     
-    # create a new tensor with the same data as z but detached from 
-    # the computation graph such that any operations performed on it won't be tracked 
-    z = z.detach().requires_grad_(True) 
+    Args:
+        decoder: torch.nn.Module, maps z -> f(z) in R^D (e.g., GaussianDecoder)
+        z: torch.Tensor of shape (M,) or (1, M), a single latent point
+    
+    Returns:
+        J: Jacobian, torch.Tensor of shape (D, M), where D is the data dimension (e.g., 784 for MNIST)
+    """
+    z = z.detach().requires_grad_(True)  # Detach and enable gradient tracking
     
     def f_single_input(z_single):
         """
-        Function to compute the decoder output for a single input z_single
+        Function to compute the decoder output for a single input z_single.
         """
-        z_single = z_single.unsqueeze(0)  # Add batch dim: (*1*, M) so that it can be input to the decoder
-        decoded = decoder(z_single).mean  # extract the .mean from the distribution output. shape: (1, 1, 28, 28)
-        return decoded.squeeze(0).reshape(-1)  # shape: (784,)
+        z_single = z_single.unsqueeze(0)  # Add batch dim: (1, M)
+        decoded = decoder(z_single).mean  # Shape: (1, 1, 28, 28)
+        return decoded.squeeze(0).reshape(-1)  # Shape: (D,), e.g., (784,)
 
-    J = jacobian(f_single_input, z) # we take the jacobian of the decoder: f_single_input at input z: J(z)
-    if J.dim() == 3: J = J.squeeze(0) # If J has an extra batch dimension, remove it.
-    return J  # shape: (D, M)
-
+    J = jacobian(f_single_input, z)  # Shape: (D, M) or (1, D, M) if z has batch dim
+    if J.dim() == 3:
+        J = J.squeeze(0)  # Remove batch dim if present
+    return J  # Shape: (D, M)
 
 def compute_pullback_metric(decoder, z):
     """
-    Computes Pullback Metric G_z = J_f(z)^T J_f(z)
+    Computes the pullback metric G_z = J_f(z)^T J_f(z).
+    
     Args:
-        decoder: decoder network
-        z: torch.Tensor of shape (M,) or (1, M)
+        decoder: Decoder network (e.g., GaussianDecoder)
+        z: torch.Tensor of shape (M,) or (1, M), a single latent point
+    
     Returns:
-        G: torch.Tensor of shape (M, M)
+        G: torch.Tensor of shape (M, M), the pullback metric
     """
-    # from assignment: the pullback metric should be associated 
-    # with the mean of the Gaussian decoder
-    J = compute_decoder_jacobian(decoder, z)  # (D, M)
-    G = J.T @ J  # (M, M)
+    J = compute_decoder_jacobian(decoder, z)  # Shape: (D, M)
+    G = J.T @ J  # Shape: (M, M)
     return G
-
-
 
 def compute_energy(decoder, curve_points):
     """
-    Computes discrete energy of a curve under pullback metric.
+    Computes the discrete energy of a curve under the pullback metric.
+    
     Args:
-        decoder: decoder network
-        curve_points: list of tensors, each shape (M,)
+        decoder: Decoder network (e.g., GaussianDecoder)
+        curve_points: torch.Tensor of shape (T, M), where T is the number of points along the curve,
+                      and M is the latent dimension
+    
     Returns:
-        scalar torch.Tensor
+        energy: torch.Tensor (scalar), the total energy of the curve
     """
-    energy = 0.0
+    energy = torch.tensor(0.0, device=curve_points.device, requires_grad=True)
+    
     for i in range(len(curve_points) - 1):
-        z0 = curve_points[i]
-        z1 = curve_points[i + 1]
-        dz = z1 - z0
-        G = compute_pullback_metric(decoder, (z0 + z1) / 2)
-        local_energy = dz.view(1, -1) @ G @ dz.view(-1, 1) 
-        local_energy = local_energy.squeeze()
-        energy += local_energy
+        z0 = curve_points[i]  # Shape: (M,)
+        z1 = curve_points[i + 1]  # Shape: (M,)
+        dz = z1 - z0  # Shape: (M,)
+        
+        # Compute pullback metric at the midpoint
+        z_mid = (z0 + z1) / 2  # Shape: (M,)
+        G = compute_pullback_metric(decoder, z_mid)  # Shape: (M, M)
+        
+        # Compute local energy: dz^T G dz
+        local_energy = dz.view(1, -1) @ G @ dz.view(-1, 1)  # Shape: (1, 1)
+        local_energy = local_energy.squeeze()  # Scalar
+        energy = energy + local_energy
+    
     return energy
 
+def compute_length(decoder, curve):
+    """
+    Computes the approximate geodesic length of a curve via the pullback metric.
+    
+    Args:
+        decoder: Decoder network (e.g., GaussianDecoder)
+        curve: torch.Tensor of shape (T, M), where T is the number of points along the curve,
+               and M is the latent dimension
+    
+    Returns:
+        length: float, the total length of the curve
+    """
+    length = 0.0
+    
+    for i in range(len(curve) - 1):
+        z1 = curve[i]  # Shape: (M,)
+        z2 = curve[i + 1]  # Shape: (M,)
+        delta = z2 - z1  # Shape: (M,)
+        z_mid = (z1 + z2) / 2.0  # Shape: (M,)
+        z_mid = z_mid.unsqueeze(0)  # Shape: (1, M)
+        z_mid.requires_grad_(True)
 
-# def optimize_geodesic(decoder, z_start, z_end, num_points=10, num_iters=500, lr=1e-2):
-#     """
-#     Optimize Geodesic via Energy Minimization
-#     Compute geodesic from z_start to z_end using energy minimization.
-    
-#     Args:
-#     decoder: decoder network
-#     z_start, z_end: torch.Tensor of shape (M,)
-#     num_points: number of total points in curve
-#     num_iters: gradient descent steps
-#     lr: learning rate
-    
-#     Returns:
-#     List of torch.Tensor geodesic points
-#     """
-#     M = z_start.shape[-1]
-    
-#     # Initialize intermediate points
-#     # we use torch.no_grad() to disable gradient tracking for the initialization
-#     with torch.no_grad():
-#         # Inital guess: straight line from z_start to z_end
-#         inits = [z_start + (i / (num_points - 1)) * (z_end - z_start) for i in range(num_points)]
-#         intermediates = [torch.nn.Parameter(p.clone()) for p in inits[1:-1]] # exclude endpoints
-    
-#     optimizer = torch.optim.Adam(intermediates, lr=lr) # optimizer for the intermediate points
-    
-#     # Find geodesic with minimum energy
-#     # Wrap the range with tqdm for a progress bar
-#     for _ in tqdm(range(num_iters), desc="Optimizing Geodesic"):
-#         optimizer.zero_grad()
+        # Define a function to compute the decoder output as a flat vector
+        def decoder_flat(z):
+            return decoder(z).mean.view(-1)  # Shape: (D,), e.g., (784,)
+
+        # Compute Jacobian: shape (D, M)
+        J = torch.autograd.functional.jacobian(decoder_flat, z_mid).squeeze(1)  # Shape: (D, M)
         
-#         curve = [z_start] + intermediates + [z_end] # make the curve by concatenating all points
-#         energy = compute_energy(decoder, curve) # energy is differentiable w.r.t. intermediate points
+        # Compute pullback metric G = J^T J: shape (M, M)
+        G = J.transpose(0, 1) @ J  # Shape: (M, M)
         
-#         # compute the gradient of the energy (that is dependent the jacobian of the decoder)
-#         # so that the optimizer can update the intermediate points by moving them in the
-#         # direction of the negative gradient
-#         energy.backward()
-        
-#         # we take the step in that negative gradient direction
-#         optimizer.step()
+        # Compute length increment: sqrt(delta^T G delta)
+        length_increment = torch.sqrt(delta @ G @ delta).item()
+        length += length_increment
     
-#     # Final curve extraction
-#     with torch.no_grad():
-#         curve = [z_start] + [p.clone() for p in intermediates] + [z_end]
-    
-#     return curve
+    return length
 
 def plot_geodesic_latents(geodesic, ax=None, color='C0', show_endpoints=True, label_once=False):
     """
@@ -152,9 +148,6 @@ def plot_geodesic_latents(geodesic, ax=None, color='C0', show_endpoints=True, la
     ax.set_title('Geodesic in Latent Space')
     ax.axis('equal')
     ax.grid(True)
-
-
-
 
 def plot_decoded_images(decoder, geodesic):
     """
@@ -208,7 +201,7 @@ def plot_latent_std_background(decoder, grid_size=100, z1_range=(-6, 6), z2_rang
 
     return ax
 
-def plot_latent_std_background_across_decoders(decoders, grid_size=100, z1_range=(-10, 10), z2_range=(-10, 10), device='cpu', ax=None):
+def plot_latent_std_background_across_decoders(decoders, grid_size=100, z1_range=(-6, 6), z2_range=(-6, 6), device='cpu', ax=None):
     """
     Plot background of std dev of decoder outputs across multiple decoders for the same latent points.
     
@@ -349,77 +342,6 @@ def model_average_energy(c, decoders, num_samples=10):
         energy = energy + segment_energy
     
     return energy
-
-# def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energy_fn):
-#     """
-#     Optimize a geodesic curve between z_start and z_end by minimizing the given energy function.
-    
-#     Args:
-#         decoders: List of decoder models (ensemble members) or a single decoder.
-#         z_start: torch.Tensor of shape (M,), starting point in latent space.
-#         z_end: torch.Tensor of shape (M,), ending point in latent space.
-#         num_points: int, number of points along the curve (including endpoints).
-#         num_iters: int, number of optimization iterations.
-#         lr: float, learning rate for the optimizer.
-#         energy_fn: Callable, function that computes the energy of the curve.
-#                   Takes a curve (tensor of shape (num_points, M)) and decoders as input.
-    
-#     Returns:
-#         curve: torch.Tensor of shape (num_points, M), the optimized geodesic curve.
-#     """
-#     # Ensure z_start and z_end are on the correct device and have the right shape
-#     device = z_start.device
-#     M = z_start.shape[0]  # Latent dimension
-    
-#     # Initialize the curve as a straight line from z_start to z_end
-#     t = torch.linspace(0, 1, num_points, device=device)  # Shape: (num_points,)
-#     t = t.unsqueeze(-1)  # Shape: (num_points, 1)
-#     z_start = z_start.unsqueeze(0)  # Shape: (1, M)
-#     z_end = z_end.unsqueeze(0)  # Shape: (1, M)
-#     curve = (1 - t) * z_start + t * z_end  # Shape: (num_points, M)
-    
-#     # Extract intermediate points as a separate leaf tensor for optimization
-#     intermediate_points = curve[1:-1].clone().detach().requires_grad_(True)  # Shape: (num_points-2, M)
-    
-#     # Optimizer: optimize only the intermediate points
-#     optimizer = torch.optim.Adam([intermediate_points], lr=lr)
-    
-#     # Optimization loop with tqdm progress bar
-#     with tqdm(range(num_iters), desc="Optimizing geodesic") as pbar:
-#         for step in pbar:
-#             optimizer.zero_grad()
-            
-#             # Reconstruct the full curve with fixed endpoints
-#             curve = torch.cat([
-#                 z_start,  # Fixed start
-#                 intermediate_points,  # Trainable intermediate points
-#                 z_end  # Fixed end
-#             ], dim=0)  # Shape: (num_points, M)
-            
-#             # Compute the energy
-#             energy = energy_fn(curve)
-            
-#             # Backward pass
-#             energy.backward()
-            
-#             # Update the intermediate points
-#             optimizer.step()
-            
-#             # Update tqdm description with current energy
-#             pbar.set_description(f"Optimizing geodesic, Energy: {energy.item():.4f}")
-    
-#     # Final curve with fixed endpoints
-#     final_curve = torch.cat([
-#         z_start,
-#         intermediate_points.detach(),
-#         z_end
-#     ], dim=0)
-    
-#     # Compute and print the final energy
-#     final_energy = energy_fn(final_curve)
-#     print(f"Final energy after optimization: {final_energy.item():.4f}")
-    
-#     return final_curve
 
 def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energy_fn, convergence_threshold=1e-3, window_size=10):
     device = z_start.device
