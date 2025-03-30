@@ -8,12 +8,14 @@ import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 import numpy as np
-from geodesics_utilsbis import optimize_geodesic, compute_energy, model_average_energy, compute_length, compute_metric_determinant, compute_ensemble_std, plot_latent_std_background
+from geodesics_utilsbis import optimize_geodesic, compute_energy, model_average_energy, compute_length, plot_geodesics
 
 """
     How to run:
     python project2_final_code.py geodesics_single --device cuda --num-curves 2 --num-t 15 --num-iters 50 --lr 1e-2 --num-decoders 10
     python project2_final_code.py geodesics_ensemble --device cuda --num-curves 2 --num-t 15 --num-iters 50 --lr 1e-2 --num-decoders 10
+
+    python project2_final_code.py cov_plot --device cuda --num-t 15 --num-iters 50 --lr 1e-2
 """
 class GaussianPrior(nn.Module):
     def __init__(self, M):
@@ -274,19 +276,40 @@ if __name__ == "__main__":
         single_decoder_model.load_state_dict(torch.load(single_decoder_path))
         single_decoder_model.eval()
 
-        # Step 1: Generate 25 random latent pairs
+        # Step 0: Load and project all test points into latent space
+        test_latents = []
+        test_labels = []
+        data_iter = iter(mnist_test_loader)
+        for x_batch, labels in mnist_test_loader:
+            x_batch = x_batch.to(device)
+            with torch.no_grad():
+                # Use the encoder from the single-decoder model (same encoder for both modes)
+                z = single_decoder_model.encoder(x_batch).mean  # Shape: (batch_size, 2)
+            test_latents.append(z)
+            test_labels.append(labels)
+        test_latents = torch.cat(test_latents, dim=0).cpu()  # Shape: (2048, 2)
+        test_labels = torch.cat(test_labels, dim=0).cpu()  # Shape: (2048,)
+
+        # Step 1: Generate latent pairs and store their class labels
         latent_pairs = []
+        latent_pair_labels = []  # Store (label1, label2) for each pair
         data_iter = iter(mnist_test_loader)
         for _ in range(args.num_curves):
-            x_batch, _ = next(data_iter)
+            x_batch, label_batch = next(data_iter)
             x_batch = x_batch.to(device)
+            label_batch = label_batch.to(device)
             x1 = x_batch[0].unsqueeze(0)  # Shape: (1, 1, 28, 28)
             x2 = x_batch[1].unsqueeze(0)
+            label1 = label_batch[0]  # Class label of x1
+            label2 = label_batch[1]  # Class label of x2
             with torch.no_grad():
                 z1 = single_decoder_model.encoder(x1).mean.squeeze(0)  # Shape: (2,)
                 z2 = single_decoder_model.encoder(x2).mean.squeeze(0)
             latent_pairs.append((z1, z2))
+            latent_pair_labels.append((label1, label2))
         torch.save(latent_pairs, os.path.join(args.experiment_folder, "latent_pairs_single.pt"))
+        torch.save(latent_pair_labels, os.path.join(args.experiment_folder, "latent_pair_labels.pt"))
+        print(f"Saved latent points in {args.experiment_folder}/latent_pairs_single.pt")
 
         # Step 2: Compute geodesics for single decoder
         single_decoder = single_decoder_model.decoders[0]
@@ -294,7 +317,6 @@ if __name__ == "__main__":
         for curve_idx, (z1, z2) in enumerate(latent_pairs):
             print(f"Computing geodesic #{curve_idx+1}/{len(latent_pairs)} (Single Decoder)")
             geodesic = optimize_geodesic(
-                decoders=[single_decoder],
                 z_start=z1,
                 z_end=z2,
                 num_points=args.num_t,
@@ -305,67 +327,23 @@ if __name__ == "__main__":
                 window_size=10
             )
             single_geodesics.append(geodesic)
+        torch.save(single_geodesics, os.path.join(args.experiment_folder, f"single_geodesics_num-t={args.num_t}.pt"))
 
-        # Step 3: Plotting for Single Decoder with Metric Determinant Background
-        fig, ax = plt.subplots(figsize=(8, 8))
-        all_latents = torch.stack([z for pair in latent_pairs for z in pair])
-        z1_min, z1_max = all_latents[:, 0].min().item(), all_latents[:, 0].max().item()
-        z2_min, z2_max = all_latents[:, 1].min().item(), all_latents[:, 1].max().item()
-        padding = 6.0
-        zlim = {'z1': (z1_min - padding, z1_max + padding), 'z2': (z2_min - padding, z2_max + padding)}
-
-        # plot_latent_std_background(single_decoder, device=device, ax=ax)
-        # Create a grid for background computation
-        # n_grid = 50
-        # z1_vals = np.linspace(zlim['z1'][0], zlim['z1'][1], n_grid)
-        # z2_vals = np.linspace(zlim['z2'][0], zlim['z2'][1], n_grid)
-        # Z1, Z2 = np.meshgrid(z1_vals, z2_vals)
-        # z_grid = torch.tensor(np.stack([Z1.ravel(), Z2.ravel()], axis=1), dtype=torch.float32)
-
-        # # Compute the determinant of the metric G
-        # det_G = compute_metric_determinant(single_decoder, z_grid, device)
-        # det_G = det_G.reshape(n_grid, n_grid)
-
-        # # Plot background as a heatmap (instead of contourf)
-        # im = ax.imshow(
-        #     np.log1p(det_G),  # log1p for better scaling
-        #     origin='lower',
-        #     extent=[zlim['z1'][0], zlim['z1'][1], zlim['z2'][0], zlim['z2'][1]],
-        #     cmap='viridis',
-        #     aspect='equal'
-        # )
-        # cbar = plt.colorbar(im, ax=ax)
-        # cbar.set_label('log(1 + det(G))')
-
-        # Scatter plot of latent points
-        ax.scatter(all_latents[:, 0].cpu(), all_latents[:, 1].cpu(), s=50, alpha=0.5, color='black', 
-                label='Latent Points', zorder=2)
-
-        # Generate unique colors for each curve
-        cmap = plt.get_cmap('tab10') if args.num_curves <= 10 else plt.get_cmap('hsv')
-        colors = [cmap(i / (args.num_curves - 1)) if args.num_curves > 1 else cmap(0) for i in range(args.num_curves)]
-
-        # Plot geodesics with unique colors
-        for i, geod in enumerate(single_geodesics):
-            geod_cpu = geod.cpu()
-            ax.plot(geod_cpu[:, 0], geod_cpu[:, 1], color=colors[i], lw=2.5, 
-                    label=f'Geodesic {i+1}' if args.num_curves <= 5 else None, zorder=3)
-            z1, z2 = latent_pairs[i]
-            ax.plot([z1[0].cpu(), z2[0].cpu()], [z1[1].cpu(), z2[1].cpu()], color=colors[i], 
-                    lw=1.5, linestyle='--', alpha=0.7, 
-                    label=f'Straight {i+1}' if i == 0 and args.num_curves <= 5 else None, zorder=3)
-
-        # Customize plot
-        ax.set_xlim(zlim['z1'])
-        ax.set_ylim(zlim['z2'])
-        ax.set_xlabel('z1', fontsize=12)
-        ax.set_ylabel('z2', fontsize=12)
-        ax.set_title("Geodesics with Metric Determinant (Single Decoder VAE)", fontsize=14, pad=10)
-        ax.legend(loc='upper right', fontsize=10, frameon=False)
-        ax.set_aspect('equal')
-        plt.tight_layout()
-        plt.savefig("geodesic_plot_single_decoder.png", dpi=300)
-        plt.show()
+        # Step 3: Plot using the consolidated function
+        plot_geodesics(
+            latent_pairs=latent_pairs,
+            latent_pair_labels=latent_pair_labels,
+            geodesics=single_geodesics,
+            test_latents=test_latents,
+            test_labels=test_labels,
+            model=single_decoder_model,
+            mode=args.mode,
+            num_decoders=1,
+            device=device,
+            experiment_folder=args.experiment_folder,
+            filename_suffix=f"num-t={args.num_t}"
+        )
+        
 
     # elif args.mode == "geodesics_ensemble":
         # Load the ensemble VAE
@@ -391,6 +369,8 @@ if __name__ == "__main__":
         #         z2 = ensemble_model.encoder(x2).mean.squeeze(0)
         #     latent_pairs.append((z1, z2))
         # torch.save(latent_pairs, os.path.join(args.experiment_folder, "latent_pairs_ensemble.pt"))
+        
+        # latent_pairs = torch.load(os.path.join(args.experiment_folder, "latent_pair_single.pt"))
 
         # Step 2: Compute geodesics for ensemble decoder
         ensemble_decoders = ensemble_model.decoders
@@ -398,98 +378,52 @@ if __name__ == "__main__":
         for curve_idx, (z1, z2) in enumerate(latent_pairs):
             print(f"Computing geodesic #{curve_idx+1}/{len(latent_pairs)} (Ensemble Decoder)")
             geodesic = optimize_geodesic(
-                decoders=ensemble_decoders,
                 z_start=z1,
                 z_end=z2,
                 num_points=args.num_t,
                 num_iters=args.num_iters,
                 lr=args.lr,
-                energy_fn=lambda c: model_average_energy(c, ensemble_decoders, num_samples=50),
+                energy_fn=lambda c: model_average_energy(c, ensemble_decoders, num_samples=1),
                 convergence_threshold=1e-3,
                 window_size=10
             )
             ensemble_geodesics.append(geodesic)
+        torch.save(single_geodesics, os.path.join(args.experiment_folder, f"ensemble_geodesics_num-t={args.num_t}.pt"))
 
         # Step 3: Plotting for Ensemble Decoder with Std Background
-        fig, ax = plt.subplots(figsize=(8, 8))
-        all_latents = torch.stack([z for pair in latent_pairs for z in pair])
-        z1_min, z1_max = all_latents[:, 0].min().item(), all_latents[:, 0].max().item()
-        z2_min, z2_max = all_latents[:, 1].min().item(), all_latents[:, 1].max().item()
-        padding = 6.0
-        zlim = {'z1': (z1_min - padding, z1_max + padding), 'z2': (z2_min - padding, z2_max + padding)}
-
-        # Create a grid for background computation
-        # n_grid = 50
-        # z1_vals = np.linspace(zlim['z1'][0], zlim['z1'][1], n_grid)
-        # z2_vals = np.linspace(zlim['z2'][0], zlim['z2'][1], n_grid)
-        # Z1, Z2 = np.meshgrid(z1_vals, z2_vals)
-        # z_grid = torch.tensor(np.stack([Z1.ravel(), Z2.ravel()], axis=1), dtype=torch.float32)
-
-        # # Compute standard deviation across 10 decoders
-        # ensemble_decoders_subset = ensemble_model.decoders[:10]
-        # std_values = compute_ensemble_std(ensemble_decoders_subset, z_grid, device)
-        # std_values = std_values.reshape(n_grid, n_grid)
-
-        # Plot background as a heatmap (instead of contourf)
-        # im = ax.imshow(
-        #     std_values,
-        #     origin='lower',
-        #     extent=[zlim['z1'][0], zlim['z1'][1], zlim['z2'][0], zlim['z2'][1]],
-        #     cmap='viridis',
-        #     aspect='equal'
-        # )
-        # cbar = plt.colorbar(im, ax=ax)
-        # cbar.set_label('Standard deviation of pixel values')  # Match the image
-
-        # Scatter plot of latent points
-        ax.scatter(all_latents[:, 0].cpu(), all_latents[:, 1].cpu(), s=50, alpha=0.5, color='black', 
-                label='Latent Points', zorder=2)
-
-        # Generate unique colors for each curve
-        cmap = plt.get_cmap('tab10') if args.num_curves <= 10 else plt.get_cmap('hsv')
-        colors = [cmap(i / (args.num_curves - 1)) if args.num_curves > 1 else cmap(0) for i in range(args.num_curves)]
-
-        # Plot geodesics with unique colors
-        for i, geod in enumerate(ensemble_geodesics):
-            geod_cpu = geod.cpu()
-            ax.plot(geod_cpu[:, 0], geod_cpu[:, 1], color=colors[i], lw=2.5, 
-                    label=f'Geodesic {i+1}' if args.num_curves <= 5 else None, zorder=3)
-            z1, z2 = latent_pairs[i]
-            ax.plot([z1[0].cpu(), z2[0].cpu()], [z1[1].cpu(), z2[1].cpu()], color=colors[i], 
-                    lw=1.5, linestyle='--', alpha=0.7, 
-                    label=f'Straight {i+1}' if i == 0 and args.num_curves <= 5 else None, zorder=3)
-
-        # Customize plot
-        ax.set_xlim(zlim['z1'])
-        ax.set_ylim(zlim['z2'])
-        ax.set_xlabel('z1', fontsize=12)
-        ax.set_ylabel('z2', fontsize=12)
-        ax.set_title(f"Geodesics with Ensemble Std (VAE with {args.num_decoders} Decoders)", fontsize=14, pad=10)
-        ax.legend(loc='upper right', fontsize=10, frameon=False)
-        ax.set_aspect('equal')
-        plt.tight_layout()
-        plt.savefig("geodesic_plot_ensemble_decoder.png", dpi=300)
-        plt.show()
+        plot_geodesics(
+            latent_pairs=latent_pairs,
+            latent_pair_labels=latent_pair_labels,
+            geodesics=ensemble_geodesics,
+            test_latents=test_latents,
+            test_labels=test_labels,
+            model=ensemble_model,
+            mode='geodesics_ensemble',
+            num_decoders=args.num_decoders,
+            device=device,
+            experiment_folder=args.experiment_folder,
+            filename_suffix=f"num-t={args.num_t}"
+        )
 
     elif args.mode == "cov_plot":
         # Define ensemble sizes to evaluate
         max_decoders = 3  # Maximum number of decoders
-        decoder_counts = list(range(1, max_decoders + 1))  # [1, 2, ..., 10]
-        M = 10  # Number of VAEs
+        decoder_counts = list(range(1, max_decoders + 1))  # [1, 2, ..., 3]
+        num_vae = 10  # Number of VAEs
         num_pairs = 10  # Number of test point pairs
 
         cov_geo_list = []  # Geodesic CoV for each ensemble size
         cov_euc_list = []  # Euclidean CoV for each ensemble size
 
-        # Step 1: Train M=10 VAEs with max_decoders (10) decoders if not already trained
+        # Step 1: Train M=10 VAEs with max_decoders (3) decoders if not already trained
         experiments_folder = f"{args.experiment_folder}/ensemble_max_decoders"
         os.makedirs(experiments_folder, exist_ok=True)
 
         # Train M VAEs with max_decoders
-        for m in range(M):
+        for m in range(num_vae):
             model_path = f"{experiments_folder}/vae_{m}.pt"
             if not os.path.exists(model_path):
-                print(f"Training VAE #{m+1}/{M} with {max_decoders} decoders")
+                print(f"Training VAE #{m+1}/{num_vae} with {max_decoders} decoders")
                 decoders = [GaussianDecoder(new_decoder()) for _ in range(max_decoders)]
                 model = VAE(GaussianPrior(M), decoders, GaussianEncoder(new_encoder())).to(device)
                 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -498,7 +432,7 @@ if __name__ == "__main__":
 
         # Step 2: Load the M VAEs and store their encoders and decoders
         models = []
-        for m in range(M):
+        for m in range(num_vae):
             model = VAE(
                 GaussianPrior(M),
                 [GaussianDecoder(new_decoder()) for _ in range(max_decoders)],
@@ -508,21 +442,15 @@ if __name__ == "__main__":
             model.eval()
             models.append(model)
 
-        # Step 3: Select test point pairs and compute latent representations
-        # Since all VAEs share the same encoder architecture, we can use any encoder to get consistent latent points
+        # Step 3: Select test point pairs (in input space)
         data_iter = iter(mnist_test_loader)
         test_pairs = []
-        latent_pairs = []
         for _ in range(num_pairs):
             x_batch, _ = next(data_iter)
             x_batch = x_batch.to(device)
             x1 = x_batch[0].unsqueeze(0)  # Shape: (1, 1, 28, 28)
             x2 = x_batch[1].unsqueeze(0)
             test_pairs.append((x1, x2))
-            with torch.no_grad():
-                z1 = models[0].encoder(x1).mean.squeeze(0)  # Shape: (2,)
-                z2 = models[0].encoder(x2).mean.squeeze(0)
-            latent_pairs.append((z1, z2))
 
         # Step 4: Compute CoV for each number of decoders
         for num_dec in decoder_counts:
@@ -532,27 +460,31 @@ if __name__ == "__main__":
             euc_dists_per_pair = []    # List of lists: [pair1_dists, pair2_dists, ...]
 
             # For each pair of test points
-            for pair_idx, (z1, z2) in enumerate(latent_pairs):
+            for pair_idx, (x1, x2) in enumerate(test_pairs):
                 print(f"Processing pair {pair_idx+1}/{num_pairs}")
                 geo_lengths = []  # Geodesic lengths for this pair across M VAEs
                 euc_dists = []    # Euclidean distances for this pair across M VAEs
 
                 # Compute distances using each VAE
                 for model_idx, model in enumerate(models):
-                    # Euclidean distance (should be the same for all models since encoders are consistent)
+                    # Encode test points with the current model's encoder
+                    with torch.no_grad():
+                        z1 = model.encoder(x1).mean.squeeze(0)  # Shape: (2,)
+                        z2 = model.encoder(x2).mean.squeeze(0)
+
+                    # Euclidean distance (varies across models due to different encoders)
                     euc_dist = torch.norm(z2 - z1).item()
                     euc_dists.append(euc_dist)
 
                     # Geodesic distance (using the first num_dec decoders)
                     decoders = model.decoders[:num_dec]  # Subset of decoders
                     geod = optimize_geodesic(
-                        decoders=decoders,
                         z_start=z1,
                         z_end=z2,
                         num_points=args.num_t,
                         num_iters=args.num_iters,
                         lr=args.lr,
-                        energy_fn=lambda c: model_average_energy(c, decoders, num_samples=50),
+                        energy_fn=lambda c: model_average_energy(c, decoders, num_samples=1),
                         convergence_threshold=1e-3,
                         window_size=10
                     )
@@ -566,8 +498,8 @@ if __name__ == "__main__":
                 euc_dists_per_pair.append(euc_dists)
 
             # Compute CoV for this ensemble size
-            geo_lengths_tensor = torch.tensor(geo_lengths_per_pair)  # Shape: (num_pairs, M)
-            euc_dists_tensor = torch.tensor(euc_dists_per_pair)      # Shape: (num_pairs, M)
+            geo_lengths_tensor = torch.tensor(geo_lengths_per_pair)  # Shape: (num_pairs, num_vae)
+            euc_dists_tensor = torch.tensor(euc_dists_per_pair)      # Shape: (num_pairs, num_vae)
 
             # CoV per pair, then average
             geo_cov = (geo_lengths_tensor.std(dim=1) / geo_lengths_tensor.mean(dim=1)).mean().item()

@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import numpy as np
 import random
+import os
 
 def compute_decoder_jacobian(decoder, z):
     """
@@ -49,17 +50,18 @@ def compute_pullback_metric(decoder, z):
 
 def compute_energy(decoder, curve_points):
     """
-    Computes the discrete energy of a curve under the pullback metric.
+    Computes the discrete energy of a curve under the pullback metric for a single decoder.
     
     Args:
-        decoder: Decoder network (e.g., GaussianDecoder)
+        decoder: Decoder network (e.g., GaussianDecoder), maps latent points to data space
         curve_points: torch.Tensor of shape (T, M), where T is the number of points along the curve,
                       and M is the latent dimension
     
     Returns:
         energy: torch.Tensor (scalar), the total energy of the curve
     """
-    energy = torch.tensor(0.0, device=curve_points.device, requires_grad=True)
+    energy = torch.tensor(0.0, device=curve_points.device)
+    dt = 1.0 / (len(curve_points) - 1)  # Segment length scaling factor
     
     for i in range(len(curve_points) - 1):
         z0 = curve_points[i]  # Shape: (M,)
@@ -70,9 +72,9 @@ def compute_energy(decoder, curve_points):
         z_mid = (z0 + z1) / 2  # Shape: (M,)
         G = compute_pullback_metric(decoder, z_mid)  # Shape: (M, M)
         
-        # Compute local energy: dz^T G dz
+        # Compute local energy: dz^T G dz, scaled by dt
         local_energy = dz.view(1, -1) @ G @ dz.view(-1, 1)  # Shape: (1, 1)
-        local_energy = local_energy.squeeze()  # Scalar
+        local_energy = local_energy.squeeze() * dt  # Scalar, scaled by segment length
         energy = energy + local_energy
     
     return energy
@@ -340,7 +342,7 @@ def model_average_energy(c, decoders, num_samples=10):
         energy: torch.Tensor (scalar), the approximated model-average energy.
     """
     N = len(c) - 1  # Number of segments
-    energy = torch.tensor(0.0, device=c.device, requires_grad=True)
+    energy = torch.tensor(0.0, device=c.device)
     
     for i in range(N):
         segment_energy = torch.tensor(0.0, device=c.device)
@@ -363,7 +365,7 @@ def model_average_energy(c, decoders, num_samples=10):
     
     return energy
 
-def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energy_fn, convergence_threshold=1e-3, window_size=10, plot=False):
+def optimize_geodesic(z_start, z_end, num_points, num_iters, lr, energy_fn, convergence_threshold=1e-3, window_size=10, plot=False, check_convergence=False):
     device = z_start.device
     M = z_start.shape[0]
     
@@ -386,7 +388,7 @@ def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energ
             energy_history.append(energy.item())
             
             # Compute change in intermediate points
-            if step > 0:
+            if step > 0 and check_convergence:
                 change = torch.norm(intermediate_points - prev_intermediate_points).item()
                 curve_changes.append(change)
             prev_intermediate_points = intermediate_points.clone().detach()
@@ -397,7 +399,7 @@ def optimize_geodesic(decoders, z_start, z_end, num_points, num_iters, lr, energ
             
             pbar.set_description(f"Optimizing geodesic, Energy: {energy.item():.4f}")
             
-            if len(energy_history) >= window_size:
+            if len(energy_history) >= window_size and check_convergence:
                 recent_energies = energy_history[-window_size:]
                 moving_avg = np.mean(recent_energies)
                 if len(energy_history) >= 2 * window_size:
@@ -503,3 +505,115 @@ def compute_ensemble_std(decoders, z_grid, device):
     outputs = np.stack(outputs, axis=0)  # Shape: (num_decoders, n_points, 784)
     std = np.std(outputs, axis=0)  # Std across decoders: (n_points, 784)
     return std.mean(axis=1)  # Average std over pixels: (n_points,)
+
+def plot_geodesics(latent_pairs, latent_pair_labels, geodesics, test_latents, test_labels, model, mode, num_decoders, device, experiment_folder, filename_suffix=""):
+    """
+    Plot geodesics in latent space with test points and latent pairs colored by class.
+    
+    Args:
+        latent_pairs (list): List of tuples (z1, z2) representing the start and end points of geodesics.
+        latent_pair_labels (list): List of tuples (label1, label2) with class labels for each latent pair.
+        geodesics (list): List of geodesic paths, each a tensor of shape (n_steps, 2).
+        test_latents (torch.Tensor): Latent projections of test points, shape (num_test_points, 2).
+        test_labels (torch.Tensor): Class labels of test points, shape (num_test_points,).
+        model: The model (single decoder or ensemble model) to compute the background.
+        mode (str): Either "geodesics_single" or "geodesics_ensemble".
+        num_decoders (int): Number of decoders (1 for single, >1 for ensemble).
+        device (str): Device to perform computations on.
+        experiment_folder (str): Folder to save the plot.
+        filename_suffix (str): Suffix to append to the filename of the plot.
+    """
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    # Compute dynamic limits based on the test_latents data
+    z1_min, z1_max = test_latents[:, 0].min().item(), test_latents[:, 0].max().item()
+    z2_min, z2_max = test_latents[:, 1].min().item(), test_latents[:, 1].max().item()
+
+    # Add some padding for better visualization
+    padding = 0.1  
+    z1_range = (z1_min - padding * abs(z1_min), z1_max + padding * abs(z1_max))
+    z2_range = (z2_min - padding * abs(z2_min), z2_max + padding * abs(z2_max))
+
+    zlim = {'z1': z1_range, 'z2': z2_range}  # Updated limits
+        
+    # Compute the determinant of the metric G
+    n_grid = 300
+    z1_vals = np.linspace(zlim['z1'][0], zlim['z1'][1], n_grid)
+    z2_vals = np.linspace(zlim['z2'][0], zlim['z2'][1], n_grid)
+    Z1, Z2 = np.meshgrid(z1_vals, z2_vals)
+    z_grid = torch.tensor(np.stack([Z1.ravel(), Z2.ravel()], axis=1), dtype=torch.float32)
+
+    # Plot the background
+    if mode == "geodesics_single":
+        # Use plot_latent_std_background for single decoder
+        # plot_latent_std_background(model.decoders[0], grid_size=100, z1_range=zlim['z1'], z2_range=zlim['z2'], device=device, ax=ax)
+        det_G = compute_metric_determinant(model.decoders[0], z_grid, device)
+        det_G = det_G.reshape(n_grid, n_grid)
+        # Plot background as a heatmap (instead of contourf)
+        im = ax.imshow(
+            # np.log1p(det_G),  # log1p for better scaling
+            det_G,
+            origin='lower',
+            extent=[zlim['z1'][0], zlim['z1'][1], zlim['z2'][0], zlim['z2'][1]],
+            cmap='viridis',
+            aspect='equal'
+        )
+        cbar = plt.colorbar(im, ax=ax)
+        # cbar.set_label('log(1 + det(G))')
+        cbar.set_label('det(G)')
+    elif mode == "geodesics_ensemble":
+        # Compute standard deviation across decoders for ensemble
+        ensemble_decoders_subset = model.decoders[:10]
+        std_values = compute_ensemble_std(ensemble_decoders_subset, z_grid, device)
+        std_values = std_values.reshape(n_grid, n_grid)
+        im = ax.imshow(
+            std_values,
+            origin='lower',
+            extent=[zlim['z1'][0], zlim['z1'][1], zlim['z2'][0], zlim['z2'][1]],
+            cmap='viridis',
+            aspect='equal'
+        )
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Standard deviation of pixel values')
+
+    # Scatter plot of all test points, colored by class
+    colors = ['blue', 'orange', 'green']  # Colors for classes 0, 1, 2
+    class_names = ['Class 0', 'Class 1', 'Class 2']
+    for class_idx in range(3):  # Classes 0, 1, 2
+        mask = test_labels == class_idx
+        ax.scatter(
+            test_latents[mask, 0], test_latents[mask, 1],
+            s=10, alpha=0.3, color=colors[class_idx], label=class_names[class_idx], zorder=1
+        )
+
+    line_width = 2
+    points_size = 50
+    # Plot geodesics (solid black lines) and straight lines (dashed black lines)
+    for i, geod in enumerate(geodesics):
+        geod_cpu = geod.cpu()
+        ax.plot(geod_cpu[:, 0], geod_cpu[:, 1], color='black', lw=line_width, zorder=3)  # Black solid lines for geodesics
+        z1, z2 = latent_pairs[i]
+        # ax.plot([z1[0].cpu(), z2[0].cpu()], [z1[1].cpu(), z2[1].cpu()], color='black', 
+        #         lw=1.5, linestyle='--', alpha=0.7, zorder=3)  # Black dashed lines for straight paths
+
+    # Plot latent pairs (start and end points) with colors based on their class
+    for i, ((z1, z2), (label1, label2)) in enumerate(zip(latent_pairs, latent_pair_labels)):
+        # Color z1 and z2 based on their class labels
+        color1 = colors[label1.item()]
+        color2 = colors[label2.item()]
+        ax.scatter(z1[0].cpu(), z1[1].cpu(), s=points_size, color=color1, edgecolors='black', linewidth=line_width, zorder=4)  # Start point
+        ax.scatter(z2[0].cpu(), z2[1].cpu(), s=points_size, color=color2, edgecolors='black', linewidth=line_width, zorder=4)  # End point
+
+
+    # Customize plot
+    ax.set_xlim(zlim['z1'])
+    ax.set_ylim(zlim['z2'])
+    ax.set_xlabel('z1', fontsize=12)
+    ax.set_ylabel('z2', fontsize=12)
+    ax.set_title(f"Geodesics in Latent Space with {num_decoders} Decoder{'s' if num_decoders > 1 else ''}", fontsize=14, pad=10)
+    ax.legend(loc='upper right', fontsize=10)
+    ax.set_aspect('equal')
+    plt.tight_layout()
+    plt.savefig(os.path.join(experiment_folder, f"geodesic_plot_{mode}_{filename_suffix}.png"), dpi=300)
+    plt.show()
+    print(f"Saved plot in {experiment_folder}/geodesic_plot_{mode}_{filename_suffix}.png")
