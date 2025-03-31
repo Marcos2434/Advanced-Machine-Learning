@@ -17,6 +17,14 @@ from geodesics_utilsbis import optimize_geodesic, compute_energy, model_average_
 
     python project2_final_code.py cov_plot --device cuda --num-t 15 --num-iters 50 --lr 1e-2
 """
+
+""" mps
+    How to run:
+    python project2_final_code.py geodesics_single --device mps --num-curves 2 --num-t 15 --num-iters 50 --lr 1e-2 --num-decoders 10
+    python project2_final_code.py geodesics_ensemble --device mps --num-curves 2 --num-t 15 --num-iters 50 --lr 1e-2 --num-decoders 10
+
+    python project2_final_code.py cov_plot --device mps --num-t 15 --num-iters 50 --lr 1e-2
+"""
 class GaussianPrior(nn.Module):
     def __init__(self, M):
         super().__init__()
