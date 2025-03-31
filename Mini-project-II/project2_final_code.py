@@ -297,7 +297,9 @@ if __name__ == "__main__":
             test_labels.append(labels)
         test_latents = torch.cat(test_latents, dim=0).cpu()  # Shape: (2048, 2)
         test_labels = torch.cat(test_labels, dim=0).cpu()  # Shape: (2048,)
-
+        torch.save(test_latents, os.path.join(args.experiment_folder, "test_latents.pt"))
+        torch.save(test_labels, os.path.join(args.experiment_folder, "test_labels.pt"))
+        
         # Step 1: Generate latent pairs and store their class labels
         latent_pairs = []
         latent_pair_labels = []  # Store (label1, label2) for each pair
@@ -353,7 +355,7 @@ if __name__ == "__main__":
         )
         
 
-    # elif args.mode == "geodesics_ensemble":
+    elif args.mode == "geodesics_ensemble":
         # Load the ensemble VAE
         ensemble_path = f"{args.experiment_folder}/vae_with_{args.num_decoders}_decoders.pt"
         ensemble_model = VAE(
@@ -377,8 +379,23 @@ if __name__ == "__main__":
         #         z2 = ensemble_model.encoder(x2).mean.squeeze(0)
         #     latent_pairs.append((z1, z2))
         # torch.save(latent_pairs, os.path.join(args.experiment_folder, "latent_pairs_ensemble.pt"))
+
         
-        # latent_pairs = torch.load(os.path.join(args.experiment_folder, "latent_pair_single.pt"))
+        # latent_pairs = []
+        # latent_pair_labels = []
+        # z1 = torch.tensor([-2.5, 1.0], device=device)
+        # z2 = torch.tensor([0.0, 5.0], device=device)
+        # label1 = torch.tensor(1, device=device)
+        # label2 = torch.tensor(0, device=device)
+        # latent_pairs.append((z1, z2))
+        # latent_pair_labels.append((label1, label2))
+
+        # # Save the latent pairs with labels
+        # torch.save(latent_pairs, os.path.join(args.experiment_folder, "latent_pairs_with_labels_ensemble.pt"))
+        # print(f"Saved {len(latent_pairs)} latent pairs with labels to latent_pairs_with_labels_ensemble.pt")
+        
+        latent_pairs = torch.load(os.path.join(args.experiment_folder, "latent_pairs_single.pt"))
+        latent_pair_labels = torch.load(os.path.join(args.experiment_folder, "latent_pair_labels.pt"))
 
         # Step 2: Compute geodesics for ensemble decoder
         ensemble_decoders = ensemble_model.decoders
@@ -391,12 +408,17 @@ if __name__ == "__main__":
                 num_points=args.num_t,
                 num_iters=args.num_iters,
                 lr=args.lr,
-                energy_fn=lambda c: model_average_energy(c, ensemble_decoders, num_samples=1),
+                energy_fn=lambda c: model_average_energy(c, ensemble_decoders, num_samples=50),
                 convergence_threshold=1e-3,
                 window_size=10
             )
             ensemble_geodesics.append(geodesic)
-        torch.save(single_geodesics, os.path.join(args.experiment_folder, f"ensemble_geodesics_num-t={args.num_t}.pt"))
+        torch.save(ensemble_geodesics, os.path.join(args.experiment_folder, f"ensemble_geodesics_num-t={args.num_t}.pt"))
+
+        ensemble_geodesics = torch.load(os.path.join(args.experiment_folder, f"ensemble_geodesics_num-t={args.num_t}.pt"))
+
+        test_latents = torch.load(os.path.join(args.experiment_folder, "test_latents.pt"))
+        test_labels = torch.load(os.path.join(args.experiment_folder, "test_labels.pt"))
 
         # Step 3: Plotting for Ensemble Decoder with Std Background
         plot_geodesics(
@@ -492,7 +514,7 @@ if __name__ == "__main__":
                         num_points=args.num_t,
                         num_iters=args.num_iters,
                         lr=args.lr,
-                        energy_fn=lambda c: model_average_energy(c, decoders, num_samples=1),
+                        energy_fn=lambda c: model_average_energy(c, decoders, num_samples=50),
                         convergence_threshold=1e-3,
                         window_size=10
                     )
