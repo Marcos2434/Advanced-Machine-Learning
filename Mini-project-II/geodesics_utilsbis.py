@@ -329,7 +329,7 @@ def compute_length(decoder, curve):
         length += torch.sqrt(delta @ G @ delta).item()
     return length
 
-def model_average_energy(c, decoders, num_samples=10):
+def model_average_energy(c, decoders, num_samples=1):
     """
     Compute the model-average curve energy using Monte Carlo sampling, keeping gradients.
     
@@ -551,16 +551,16 @@ def plot_geodesics(latent_pairs, latent_pair_labels, geodesics, test_latents, te
         det_G = det_G.reshape(n_grid, n_grid)
         # Plot background as a heatmap (instead of contourf)
         im = ax.imshow(
-            # np.log1p(det_G),  # log1p for better scaling
-            det_G,
+            np.log1p(det_G),  # log1p for better scaling
+            # det_G,
             origin='lower',
             extent=[zlim['z1'][0], zlim['z1'][1], zlim['z2'][0], zlim['z2'][1]],
             cmap='viridis',
             aspect='equal'
         )
         cbar = plt.colorbar(im, ax=ax)
-        # cbar.set_label('log(1 + det(G))')
-        cbar.set_label('det(G)')
+        cbar.set_label('log(1 + det(G))')
+        # cbar.set_label('det(G)')
     elif mode == "geodesics_ensemble":
         # Compute standard deviation across decoders for ensemble
         ensemble_decoders_subset = model.decoders[:10]

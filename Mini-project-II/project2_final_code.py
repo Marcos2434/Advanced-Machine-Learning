@@ -9,11 +9,12 @@ import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 import numpy as np
 from geodesics_utilsbis import optimize_geodesic, compute_energy, model_average_energy, compute_length, plot_geodesics
+import random
 
 """
     How to run:
-    python project2_final_code.py geodesics_single --device cuda --num-curves 2 --num-t 15 --num-iters 50 --lr 1e-2 --num-decoders 10
-    python project2_final_code.py geodesics_ensemble --device cuda --num-curves 2 --num-t 15 --num-iters 50 --lr 1e-2 --num-decoders 10
+    python project2_final_code.py geodesics_single --device cuda --num-curves 25 --num-t 128 --num-iters 50 --lr 5e-2 --num-decoders 3
+    python project2_final_code.py geodesics_ensemble --device cuda --num-curves 25 --num-t 128 --num-iters 50 --lr 5e-2 --num-decoders 3
 
     python project2_final_code.py cov_plot --device cuda --num-t 15 --num-iters 50 --lr 1e-2
 """
@@ -65,13 +66,12 @@ class VAE(nn.Module):
         self.encoder = encoder
         self.num_decoders = len(decoders)
 
-    def elbo(self, x):
-        q = self.encoder(x)
-        z = q.rsample()
-        elbo_sum = 0.0
-        for decoder in self.decoders:
-            elbo_sum += (decoder(z).log_prob(x) - q.log_prob(z) + self.prior().log_prob(z)).mean()
-        return elbo_sum / self.num_decoders
+    def elbo(self, x, decoder_idx):
+        q = self.encoder(x)  
+        z = q.rsample()  
+        decoder = self.decoders[decoder_idx]
+        elbo = torch.mean(decoder(z).log_prob(x) - q.log_prob(z) + self.prior().log_prob(z))  # Compute ELBO using the likelihood, posterior and prior
+        return elbo
 
     def sample(self, n_samples=1, decoder_idx=None):
         z = self.prior().sample(torch.Size([n_samples]))
@@ -79,11 +79,12 @@ class VAE(nn.Module):
             decoder_idx = torch.randint(0, self.num_decoders, (1,)).item()
         return self.decoders[decoder_idx](z).sample()
 
-    def forward(self, x):
-        return -self.elbo(x)
+    def forward(self, x, decoder_idx):
+        return -self.elbo(x, decoder_idx)
 
-def train(model, optimizer, data_loader, epochs, device):
-    num_steps = len(data_loader) * epochs
+def train(model, optimizers, data_loader, epochs_per_decoder, device):
+    total_epochs = epochs_per_decoder * model.num_decoders
+    num_steps = len(data_loader) * total_epochs
     epoch = 0
 
     def noise(x, std=0.05):
@@ -95,8 +96,10 @@ def train(model, optimizer, data_loader, epochs, device):
             try:
                 x = next(iter(data_loader))[0]
                 x = noise(x.to(device))
+                decoder_idx = torch.randint(0, model.num_decoders, (1,)).item()
+                optimizer = optimizers[decoder_idx]
                 optimizer.zero_grad()
-                loss = model(x)
+                loss = model(x, decoder_idx)
                 loss.backward()
                 optimizer.step()
 
@@ -254,10 +257,12 @@ if __name__ == "__main__":
         # Create a VAE with the specified number of decoders
         decoders = [GaussianDecoder(new_decoder()) for _ in range(args.num_decoders)]
         model = VAE(GaussianPrior(M), decoders, GaussianEncoder(new_encoder())).to(device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        optimizers = [
+            torch.optim.Adam(list(model.encoder.parameters()) + list(decoder.parameters()), lr=args.lr) for decoder in model.decoders
+        ]
 
         print(f"Training VAE with {args.num_decoders} decoders")
-        train(model, optimizer, mnist_train_loader, args.epochs_per_decoder, device)
+        train(model, optimizers, mnist_train_loader, args.epochs_per_decoder, device)
         torch.save(model.state_dict(), f"{experiments_folder}/vae_with_{args.num_decoders}_decoders.pt")
 
         # For Part A: Also train a single-decoder VAE if not already trained
@@ -269,7 +274,7 @@ if __name__ == "__main__":
                 [GaussianDecoder(new_decoder())],
                 GaussianEncoder(new_encoder())
             ).to(device)
-            optimizer = torch.optim.Adam(single_decoder_model.parameters(), lr=args.lr)
+            optimizer = [torch.optim.Adam(single_decoder_model.parameters(), lr=args.lr)]
             train(single_decoder_model, optimizer, mnist_train_loader, args.epochs_per_decoder, device)
             torch.save(single_decoder_model.state_dict(), single_decoder_path)
 
@@ -321,23 +326,33 @@ if __name__ == "__main__":
         torch.save(latent_pair_labels, os.path.join(args.experiment_folder, "latent_pair_labels.pt"))
         print(f"Saved latent points in {args.experiment_folder}/latent_pairs_single.pt")
 
+        latent_pairs = torch.load(os.path.join(args.experiment_folder, "latent_pairs_single.pt"))
+        latent_pair_labels = torch.load(os.path.join(args.experiment_folder, "latent_pair_labels.pt"))
+
         # Step 2: Compute geodesics for single decoder
         single_decoder = single_decoder_model.decoders[0]
         single_geodesics = []
-        for curve_idx, (z1, z2) in enumerate(latent_pairs):
+        geodesics_dir = f'{args.experiment_folder}/geodesics_single_num-t={args.num_t}'
+        os.makedirs(geodesics_dir, exist_ok=True)
+        for curve_idx, (z1, z2) in enumerate(latent_pairs[:args.num_curves]):
             print(f"Computing geodesic #{curve_idx+1}/{len(latent_pairs)} (Single Decoder)")
-            geodesic = optimize_geodesic(
-                z_start=z1,
-                z_end=z2,
-                num_points=args.num_t,
-                num_iters=args.num_iters,
-                lr=args.lr,
-                energy_fn=lambda c: compute_energy(single_decoder, c),
-                convergence_threshold=1e-3,
-                window_size=10
-            )
+            geodesic_path = f'{geodesics_dir}/geodesic_single_{curve_idx+1}.pt'
+            if os.path.exists(geodesic_path):
+                geodesic = torch.load(geodesic_path, map_location=device)
+                print(f"Geodesic loaded from {geodesic_path}")
+            else:
+                geodesic = optimize_geodesic(
+                    z_start=z1,
+                    z_end=z2,
+                    num_points=args.num_t,
+                    num_iters=args.num_iters,
+                    lr=args.lr,
+                    energy_fn=lambda c: compute_energy(single_decoder, c),
+                    convergence_threshold=1e-3,
+                    window_size=10
+                )
+                torch.save(geodesic, geodesic_path)
             single_geodesics.append(geodesic)
-        torch.save(single_geodesics, os.path.join(args.experiment_folder, f"single_geodesics_num-t={args.num_t}.pt"))
 
         # Step 3: Plot using the consolidated function
         plot_geodesics(
@@ -400,6 +415,8 @@ if __name__ == "__main__":
         # Step 2: Compute geodesics for ensemble decoder
         ensemble_decoders = ensemble_model.decoders
         ensemble_geodesics = []
+        geodesics_dir = f'{args.experiment_folder}/geodesics_ensemble_num-t={args.num_t}'
+        os.makedirs(geodesics_dir, exist_ok=True)
         for curve_idx, (z1, z2) in enumerate(latent_pairs):
             print(f"Computing geodesic #{curve_idx+1}/{len(latent_pairs)} (Ensemble Decoder)")
             geodesic = optimize_geodesic(
@@ -408,14 +425,20 @@ if __name__ == "__main__":
                 num_points=args.num_t,
                 num_iters=args.num_iters,
                 lr=args.lr,
-                energy_fn=lambda c: model_average_energy(c, ensemble_decoders, num_samples=50),
+                energy_fn=lambda c: model_average_energy(c, ensemble_decoders, num_samples=1),
                 convergence_threshold=1e-3,
                 window_size=10
             )
             ensemble_geodesics.append(geodesic)
-        torch.save(ensemble_geodesics, os.path.join(args.experiment_folder, f"ensemble_geodesics_num-t={args.num_t}.pt"))
+            geodesic_path = f'{geodesics_dir}/geodesic_ensemble_{curve_idx+1}.pt'
+            torch.save(geodesic, geodesic_path)
 
-        ensemble_geodesics = torch.load(os.path.join(args.experiment_folder, f"ensemble_geodesics_num-t={args.num_t}.pt"))
+        # ensemble_geodesics = []
+        # for i in range(25):
+        #     geodesic_path = f'{geodesics_dir}/geodesic_ensemble_{i+1}.pt'
+        #     geodesic = torch.load(geodesic_path)  
+        #     ensemble_geodesics.append(geodesic)
+
 
         test_latents = torch.load(os.path.join(args.experiment_folder, "test_latents.pt"))
         test_labels = torch.load(os.path.join(args.experiment_folder, "test_labels.pt"))
@@ -456,8 +479,10 @@ if __name__ == "__main__":
                 print(f"Training VAE #{m+1}/{num_vae} with {max_decoders} decoders")
                 decoders = [GaussianDecoder(new_decoder()) for _ in range(max_decoders)]
                 model = VAE(GaussianPrior(M), decoders, GaussianEncoder(new_encoder())).to(device)
-                optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-                train(model, optimizer, mnist_train_loader, args.epochs_per_decoder, device)
+                optimizers = [
+                    torch.optim.Adam(list(model.encoder.parameters()) + list(decoder.parameters()), lr=args.lr) for decoder in model.decoders
+                ]
+                train(model, optimizers, mnist_train_loader, args.epochs_per_decoder, device)
                 torch.save(model.state_dict(), model_path)
 
         # Step 2: Load the M VAEs and store their encoders and decoders
@@ -473,16 +498,25 @@ if __name__ == "__main__":
             models.append(model)
 
         # Step 3: Select test point pairs (in input space)
-        data_iter = iter(mnist_test_loader)
+        test_dataset = mnist_test_loader.dataset
+        dataset_size = len(test_dataset)
+
         test_pairs = []
+        random.seed(42)
         for _ in range(num_pairs):
-            x_batch, _ = next(data_iter)
-            x_batch = x_batch.to(device)
-            x1 = x_batch[0].unsqueeze(0)  # Shape: (1, 1, 28, 28)
-            x2 = x_batch[1].unsqueeze(0)
+            # Randomly select two different indices from the entire dataset
+            idx1, idx2 = random.sample(range(dataset_size), 2)
+            x1, _ = test_dataset[idx1]  # Get sample (tensor, label)
+            x2, _ = test_dataset[idx2]
+            x1 = x1.unsqueeze(0).to(device)  # Shape: (1, 1, 28, 28)
+            x2 = x2.unsqueeze(0).to(device)  # Shape: (1, 1, 28, 28)
             test_pairs.append((x1, x2))
+        torch.save(test_pairs, f"{args.experiment_folder}/test_pairs_cov.pt")
 
         # Step 4: Compute CoV for each number of decoders
+        counter = 0
+        geodesics_dir = f"{args.experiment_folder}/geodesics_cov"
+        os.makedirs(geodesics_dir, exist_ok=True)
         for num_dec in decoder_counts:
             print(f"\n--- Analyzing Ensemble Size {num_dec} Decoders ---")
 
@@ -506,23 +540,38 @@ if __name__ == "__main__":
                     euc_dist = torch.norm(z2 - z1).item()
                     euc_dists.append(euc_dist)
 
-                    # Geodesic distance (using the first num_dec decoders)
-                    decoders = model.decoders[:num_dec]  # Subset of decoders
-                    geod = optimize_geodesic(
-                        z_start=z1,
-                        z_end=z2,
-                        num_points=args.num_t,
-                        num_iters=args.num_iters,
-                        lr=args.lr,
-                        energy_fn=lambda c: model_average_energy(c, decoders, num_samples=50),
-                        convergence_threshold=1e-3,
-                        window_size=10
-                    )
+                    geodesic_path = f"{geodesics_dir}/geodesic_{counter}.pt"
+                    counter += 1
+                    if not os.path.exists(geodesic_path):
+                        # Geodesic distance (using the first num_dec decoders)
+                        decoders = model.decoders[:num_dec]  # Subset of decoders
+                        geod = optimize_geodesic(
+                            z_start=z1,
+                            z_end=z2,
+                            num_points=args.num_t,
+                            num_iters=args.num_iters,
+                            lr=args.lr,
+                            energy_fn=lambda c: model_average_energy(c, decoders, num_samples=1),
+                            convergence_threshold=1e-3,
+                            window_size=10
+                        )
+                        torch.save(geod, geodesic_path)
+                    else:
+                        geod = torch.load(geodesic_path)
+                        print(f"Loaded geodesic from {geodesic_path}")
+                        
                     # Compute average geodesic length over the subset of decoders
                     geo_length = sum(compute_length(dec, geod) for dec in decoders) / len(decoders)
                     geo_lengths.append(geo_length)
 
                     print(f"  VAE {model_idx+1}: Euclidean={euc_dist:.4f}, Geodesic={geo_length:.4f}")
+
+                # Compute and print CoV for this pair
+                geo_lengths_tensor = torch.tensor(geo_lengths)  # Shape: (num_vae,)
+                euc_dists_tensor = torch.tensor(euc_dists)      # Shape: (num_vae,)
+                geo_cov_pair = (geo_lengths_tensor.std() / geo_lengths_tensor.mean()).item() if geo_lengths_tensor.mean() != 0 else float('nan')
+                euc_cov_pair = (euc_dists_tensor.std() / euc_dists_tensor.mean()).item() if euc_dists_tensor.mean() != 0 else float('nan')
+                print(f"  Pair {pair_idx+1} CoV: Geodesic={geo_cov_pair:.4f}, Euclidean={euc_cov_pair:.4f}")
 
                 geo_lengths_per_pair.append(geo_lengths)
                 euc_dists_per_pair.append(euc_dists)
@@ -550,3 +599,32 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.savefig("cov_plot_ensemble_size.png")
         plt.show()
+
+    elif args.mode == 'sample':
+        outputs_ensemble = f"{args.experiment_folder}/vae_ensemble_samples"
+        os.makedirs(outputs_ensemble, exist_ok=True)
+
+        ensemble_path = f"{args.experiment_folder}/vae_with_{args.num_decoders}_decoders.pt"
+        ensemble_model = VAE(
+            GaussianPrior(M),
+            [GaussianDecoder(new_decoder()) for _ in range(args.num_decoders)],
+            GaussianEncoder(new_encoder())
+        ).to(device)
+        ensemble_model.load_state_dict(torch.load(ensemble_path))
+        ensemble_model.eval()
+
+        with torch.no_grad():
+            # Sampling from each decoder
+            for j in range(ensemble_model.num_decoders):
+                samples = ensemble_model.sample(decoder_idx=j, n_samples=64).cpu()
+                save_image(samples.view(64, 1, 28, 28), f"{outputs_ensemble}/samples_decoder{j}.png")
+
+            # Reconstruction using each decoder
+            data = next(iter(mnist_test_loader))[0].to(device)
+            z = ensemble_model.encoder(data).mean
+            for j in range(ensemble_model.num_decoders):
+                recon = ensemble_model.decoders[j](z).mean
+                save_image(
+                    torch.cat([data.cpu(), recon.cpu()], dim=0),
+                    f"{outputs_ensemble}/reconstruction_decoder{j}.png"
+            )
