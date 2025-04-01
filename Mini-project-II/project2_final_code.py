@@ -628,3 +628,141 @@ if __name__ == "__main__":
                     torch.cat([data.cpu(), recon.cpu()], dim=0),
                     f"{outputs_ensemble}/reconstruction_decoder{j}.png"
             )
+    elif args.mode == "cov_plot_parallel":
+        import concurrent.futures
+        import numpy as np
+
+        # Define ensemble sizes to evaluate
+        max_decoders = 3  # Maximum number of decoders
+        decoder_counts = list(range(1, max_decoders + 1))  # [1, 2, 3]
+        num_vae = 10  # Number of VAEs
+        num_pairs = 10  # Number of test point pairs
+
+        cov_geo_list = []  # Geodesic CoV for each ensemble size
+        cov_euc_list = []  # Euclidean CoV for each ensemble size
+
+        experiments_folder = f"{args.experiment_folder}/ensemble_max_decoders"
+        os.makedirs(experiments_folder, exist_ok=True)
+
+        # Train M VAEs with max_decoders decoders if not already trained
+        for m in range(num_vae):
+            model_path = f"{experiments_folder}/vae_{m}.pt"
+            if not os.path.exists(model_path):
+                print(f"Training VAE #{m+1}/{num_vae} with {max_decoders} decoders")
+                decoders = [GaussianDecoder(new_decoder()) for _ in range(max_decoders)]
+                model = VAE(GaussianPrior(M), decoders, GaussianEncoder(new_encoder())).to(device)
+                optimizers = [
+                    torch.optim.Adam(list(model.encoder.parameters()) + list(decoder.parameters()), lr=args.lr)
+                    for decoder in model.decoders
+                ]
+                train(model, optimizers, mnist_train_loader, args.epochs_per_decoder, device)
+                torch.save(model.state_dict(), model_path)
+
+        # Load the M VAEs
+        models = []
+        for m in range(num_vae):
+            model = VAE(
+                GaussianPrior(M),
+                [GaussianDecoder(new_decoder()) for _ in range(max_decoders)],
+                GaussianEncoder(new_encoder())
+            ).to(device)
+            model.load_state_dict(torch.load(f"{experiments_folder}/vae_{m}.pt"))
+            model.eval()
+            models.append(model)
+
+        # Select test point pairs (in input space)
+        test_dataset = mnist_test_loader.dataset
+        dataset_size = len(test_dataset)
+        test_pairs = []
+        random.seed(42)
+        for _ in range(num_pairs):
+            idx1, idx2 = random.sample(range(dataset_size), 2)
+            x1, _ = test_dataset[idx1]
+            x2, _ = test_dataset[idx2]
+            x1 = x1.unsqueeze(0).to(device)
+            x2 = x2.unsqueeze(0).to(device)
+            test_pairs.append((x1, x2))
+        torch.save(test_pairs, f"{args.experiment_folder}/test_pairs_cov.pt")
+
+        # Directory for storing geodesics
+        geodesics_dir = f"{args.experiment_folder}/geodesics_cov"
+        os.makedirs(geodesics_dir, exist_ok=True)
+
+        # Define a function to compute geodesic for one VAE on a test pair
+        def compute_for_model(pair_idx, model_idx, x1, x2, model, num_dec, args, geodesics_dir):
+            with torch.no_grad():
+                z1 = model.encoder(x1).mean.squeeze(0)  # Shape: (2,)
+                z2 = model.encoder(x2).mean.squeeze(0)
+            euc_dist = torch.norm(z2 - z1).item()
+            # Use only the first num_dec decoders for the ensemble
+            decoders = model.decoders[:num_dec]
+            # Create a unique filename for each (ensemble size, pair, model)
+            geodesic_path = os.path.join(geodesics_dir, f"geodesic_{num_dec}_{pair_idx}_{model_idx}.pt")
+            if not os.path.exists(geodesic_path):
+                geod = optimize_geodesic(
+                    z_start=z1,
+                    z_end=z2,
+                    num_points=args.num_t,
+                    num_iters=args.num_iters,
+                    lr=args.lr,
+                    energy_fn=lambda c: model_average_energy(c, decoders, num_samples=1),
+                    convergence_threshold=1e-3,
+                    window_size=10
+                )
+                torch.save(geod, geodesic_path)
+            else:
+                geod = torch.load(geodesic_path)
+                print(f"Loaded geodesic from {geodesic_path}")
+            geo_length = sum(compute_length(dec, geod) for dec in decoders) / len(decoders)
+            return pair_idx, model_idx, euc_dist, geo_length
+
+        # Compute CoV for each ensemble size
+        for num_dec in decoder_counts:
+            print(f"\n--- Analyzing Ensemble Size {num_dec} Decoders ---")
+            # Dictionary to accumulate results per test pair
+            results = {}
+            # Use ThreadPoolExecutor to parallelize over (pair, model)
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = []
+                for pair_idx, (x1, x2) in enumerate(test_pairs):
+                    for model_idx, model in enumerate(models):
+                        futures.append(executor.submit(
+                            compute_for_model, pair_idx, model_idx, x1, x2, model, num_dec, args, geodesics_dir
+                        ))
+                for future in concurrent.futures.as_completed(futures):
+                    pair_idx, model_idx, euc_dist, geo_length = future.result()
+                    if pair_idx not in results:
+                        results[pair_idx] = {'euc': [], 'geo': []}
+                    results[pair_idx]['euc'].append(euc_dist)
+                    results[pair_idx]['geo'].append(geo_length)
+                    print(f"VAE {model_idx+1} for Pair {pair_idx+1}: Euclidean={euc_dist:.4f}, Geodesic={geo_length:.4f}")
+
+            # Compute CoV per pair then average over pairs
+            geo_cov_list_for_num_dec = []
+            euc_cov_list_for_num_dec = []
+            for pair_idx in sorted(results.keys()):
+                euc_arr = np.array(results[pair_idx]['euc'])
+                geo_arr = np.array(results[pair_idx]['geo'])
+                geo_cov_pair = np.std(geo_arr) / np.mean(geo_arr) if np.mean(geo_arr) != 0 else np.nan
+                euc_cov_pair = np.std(euc_arr) / np.mean(euc_arr) if np.mean(euc_arr) != 0 else np.nan
+                print(f"Pair {pair_idx+1} CoV: Geodesic={geo_cov_pair:.4f}, Euclidean={euc_cov_pair:.4f}")
+                geo_cov_list_for_num_dec.append(geo_cov_pair)
+                euc_cov_list_for_num_dec.append(euc_cov_pair)
+
+            geo_cov = np.mean(geo_cov_list_for_num_dec)
+            euc_cov = np.mean(euc_cov_list_for_num_dec)
+            print(f"Ensemble size {num_dec}: Geodesic CoV={geo_cov:.4f}, Euclidean CoV={euc_cov:.4f}")
+            cov_geo_list.append(geo_cov)
+            cov_euc_list.append(euc_cov)
+
+        # Step 5: Plot the results
+        plt.figure(figsize=(8, 6))
+        plt.plot(decoder_counts, cov_euc_list, color='blue', label='Euclidean distance')
+        plt.plot(decoder_counts, cov_geo_list, color='orange', label='Geodesic distance')
+        plt.xlabel("Number of decoders")
+        plt.ylabel("Coefficient of Variation")
+        plt.ylim(0.05, 0.16)
+        plt.legend(loc='lower left')
+        plt.tight_layout()
+        plt.savefig("cov_plot_ensemble_size.png")
+        plt.show()
