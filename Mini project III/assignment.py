@@ -280,16 +280,11 @@ class GraphLevelVAE(torch.nn.Module):
     def sample_from_vae(self, num_samples=5):
         """
         draws z,
-
         decides N,
-
         builds node embeddings as node_proj(x_one) + h_graph,
-
         feeds them through edge_decoder,
-
         samples a symmetric adjacency.
         """
-        
         
         self.eval()
         device  = next(self.parameters()).device
