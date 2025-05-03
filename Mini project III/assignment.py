@@ -10,7 +10,7 @@ from networkx.algorithms import isomorphism
 from torch_geometric.utils import to_networkx
 
 
-device = 'mps'
+device = 'cpu'
 
 # Load the MUTAG dataset
 # Load data
@@ -163,7 +163,7 @@ def novelty_and_uniqueness(graphs):
 # example
 
 # sample M random graphs
-M = 100
+M = 1000
 samples = [
     nx.from_numpy_array(sample_connected_graph())
     for _ in range(M)
@@ -171,6 +171,262 @@ samples = [
 
 novelty_and_uniqueness(samples)
 
+
+# Provide a graph level VAE implementation
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv, global_mean_pool, BatchNorm
+from torch_geometric.utils import to_dense_adj, to_dense_batch
+
+class GraphLevelVAE(torch.nn.Module):
+    def __init__(self, in_dim, hid_dim, lat_dim, dropout=0.5):
+        super().__init__()
+        
+        self.in_dim = in_dim
+        self.hid_dim = hid_dim
+        self.lat_dim = lat_dim
+        self.lambda_conn = 5000  # penalize isolated nodes
+        
+        # encoder GNN
+        self.conv1 = GCNConv(in_dim, hid_dim)
+        self.bn1   = BatchNorm(hid_dim)
+        self.conv2 = GCNConv(hid_dim, hid_dim)
+        self.bn2   = BatchNorm(hid_dim)
+        self.conv3 = GCNConv(hid_dim, hid_dim)
+        self.bn3   = BatchNorm(hid_dim)
+        self.dropout = dropout
+        
+        self.node_proj = nn.Linear(in_dim, hid_dim)
+        
+        # decoder MLP
+        self.dec = nn.Sequential(
+            nn.Linear(lat_dim, hid_dim),
+            nn.ReLU(),
+            nn.Linear(hid_dim, hid_dim),
+        )
+        
+        self.edge_decoder = nn.Sequential(
+            nn.Linear(2*hid_dim, hid_dim),
+            nn.ReLU(),
+            nn.Linear(hid_dim, 1),
+        )
+
+
+        # balance edge vs non-edge in BCE
+        densities = [
+            G.number_of_edges() /
+            (G.number_of_nodes()*(G.number_of_nodes()-1)/2)
+            for G in graphs_from_dataset(train_dataset)
+        ]
+        p_pos      = np.mean(densities)
+        pos_weight = torch.tensor((1-p_pos)/p_pos, device=device)
+        self.bce   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        
+        # initialize edge_decoder bias so logits start near logit(p_pos)
+        init_bias = torch.log(pos_weight) * -1  # since pos_weight=(1−p)/p ⇒ logit(p)=−log(pos_weight)
+        self.edge_decoder[-1].bias.data.fill_(init_bias)
+
+        
+        # Graph-level latent parameters
+        self.lin_mu     = torch.nn.Linear(hid_dim, lat_dim)
+        self.lin_logvar = torch.nn.Linear(hid_dim, lat_dim)
+    
+    def encode(self, x, edge_index, batch):
+        x = F.leaky_relu(self.bn1(self.conv1(x, edge_index)), 0.2)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = F.leaky_relu(self.bn2(self.conv2(x, edge_index)), 0.2)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = F.leaky_relu(self.bn3(self.conv3(x, edge_index)), 0.2)
+        g = global_mean_pool(x, batch)
+        return self.lin_mu(g), self.lin_logvar(g)
+    
+    # def encode(self, x, edge_index, batch):
+    #     """
+    #     We first compute node embeddings via two rounds of graph convolution,
+    #     then squash all nodes in each graph down to a single vector by averaging. 
+    #     That single vector g is your graph-level representation.
+    #     """
+    #     x = F.relu(self.conv1(x, edge_index))
+    #     x = F.relu(self.conv2(x, edge_index))
+    #     x = F.relu(self.conv3(x, edge_index))
+    #     g = global_mean_pool(x, batch) # For each graph i, take the mean of all node‐embeddings x[j] where batch[j]==i.
+        
+    #     # turn (and return) pooled graph vector g into mean and logvar
+    #     # into the parameters of a multivariate Gaussian in latent space
+    #     # this output is the mean and logvar of the latent variable z
+    #     # in our approximate posterior q(z|x)
+    #     return self.lin_mu(g), self.lin_logvar(g)
+    
+    def decode(self, z, x, batch):
+        # 1) per‑graph component from latent
+        h_graph = self.dec(z)                             # [B, H]
+
+        # 2) per‑node component from the encoder's raw node features
+        x_dense, mask = to_dense_batch(x, batch)          # [B, N_max, in_dim]
+        h_nodes = self.node_proj(x_dense)                 # [B, N_max, H]
+
+        # 3) inject the graph‑level info into every node
+        h_nodes = h_nodes + h_graph.unsqueeze(1)          # broadcast add
+
+        # 4) edge scores exactly as before
+        B, N, H = h_nodes.size()
+        h1 = h_nodes.unsqueeze(2).expand(B, N, N, H)
+        h2 = h_nodes.unsqueeze(1).expand(B, N, N, H)
+        pair   = torch.cat([h1, h2], dim=-1)              # [B,N,N,2H]
+        logits = self.edge_decoder(pair).squeeze(-1)      # [B,N,N]
+        return logits, mask
+    
+    # def decode(self, z, x, batch):
+    #     h = self.dec(z)                              # [B, H]
+    #     x0 = x[:, :1]; _, mask = to_dense_batch(x0, batch)
+    #     N = mask.size(1)
+    #     h_nodes = h.unsqueeze(1).expand(-1, N, -1)   # [B,N,H]
+
+    #     B, N, H = h_nodes.size()
+    #     h1 = h_nodes.unsqueeze(2).expand(B, N, N, H)
+    #     h2 = h_nodes.unsqueeze(1).expand(B, N, N, H)
+    #     pair   = torch.cat([h1, h2], dim=-1)         # [B,N,N,2H]
+    #     logits = self.edge_decoder(pair).squeeze(-1) # [B,N,N]
+    #     return logits, mask                          # raw logits
+    
+    # def decode(self, z, x, batch):
+    #     h = self.dec(z)
+        
+        
+    #     x0 = x[:, :1]                           # [num_nodes, 1]
+    #     _, mask = to_dense_batch(x0, batch)    # mask: [batch, N_max]
+    #     N_max = mask.size(1)
+        
+    #     h_nodes = h.unsqueeze(1).expand(-1, N_max, -1)
+        
+    #     # adjacency logits are computed via inner-product
+    #     adj_logits = torch.matmul(h_nodes, h_nodes.transpose(-1, -2))
+        
+    #     return torch.sigmoid(adj_logits), mask     # [b, N_max, N_max]
+    
+    def reparam(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        return mu + std * torch.randn_like(std)
+    
+    @torch.no_grad()
+    def sample_from_vae(self, num_samples=5):
+        self.eval()
+        device = next(self.parameters()).device
+        samples = []
+        for _ in range(num_samples):
+            # 1) sample z ~ N(0,I)
+            z = torch.randn(1, self.lat_dim, device=device)
+            # 2) pass through your decoder MLP
+            h = self.dec(z)                              # [1, H]
+            # 3) sample N nodes
+            num_nodes_list = [d.num_nodes for d in train_dataset]
+            node_dist      = np.bincount(num_nodes_list)
+            node_dist     = node_dist / node_dist.sum()
+            N = np.random.choice(len(node_dist), p=node_dist)
+            # 4) tile to per-node
+            h_nodes = h.unsqueeze(1).expand(1, N, -1)    # [1, N, H]
+            B, N, H = h_nodes.shape
+            # 5) build every (i,j) pair and score
+            h1 = h_nodes.unsqueeze(2).expand(B, N, N, H)
+            h2 = h_nodes.unsqueeze(1).expand(B, N, N, H)
+            pair = torch.cat([h1, h2], dim=-1)           # [1,N,N,2H]
+            logits = self.edge_decoder(pair).squeeze(-1)[0]   # [N,N]
+            probs  = torch.sigmoid(logits)
+            # 6) sample edges
+            tri = torch.triu(torch.rand_like(probs), diagonal=1) < torch.triu(probs, diagonal=1)
+            A = tri.int().cpu().numpy()
+            A = A + A.T
+            samples.append(nx.from_numpy_array(A))
+        return samples
+
+    def sample_connected_graph(self):
+        while True:
+            G = self.sample_from_vae(1)[0]
+            if nx.is_connected(G): return G
+    
+    def forward(self, data):
+        mu, logvar     = self.encode(data.x, data.edge_index, data.batch)
+        z              = self.reparam(mu, logvar)
+        logits, mask   = self.decode(z, data.x, data.batch)
+        adj_gt         = to_dense_adj(data.edge_index, data.batch)
+        return logits, adj_gt, mask, mu, logvar
+    
+    # def forward(self, data):
+    #     # forward pass
+    #     mu, logvar = self.encode(data.x, data.edge_index, data.batch)
+        
+    #     # encoder
+    #     mu, logvar = self.encode(data.x, data.edge_index, data.batch)
+        
+    #     # reparameterization trick
+    #     z = self.reparam(mu, logvar)
+
+    #     # decoder
+    #     adj_pred, mask = self.decode(z, data.x, data.batch)
+    #     adj_gt = to_dense_adj(data.edge_index, data.batch)  # [b, N_max, N_max]
+        
+    #     # forward returns the predicted adjacency matrix, the ground truth adjacency matrix, the mask, and the latent variables 
+    #     # because we need them for the loss function
+    #     return adj_pred, adj_gt, mask, mu, logvar
+        
+model = GraphLevelVAE(in_dim=node_feature_dim, hid_dim=128, lat_dim=64, dropout=0.2)
+model = model.to(device)
+opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+# load model if exists
+# train = False
+# try:
+#     model.load_state_dict(torch.load("models/vae.pth"))
+#     print("Model loaded")
+# except FileNotFoundError:
+#     print("Model not found, starting training")
+#     train = True
+    
+train = True
+kl_anneal_epochs = 200
+
+if train:
+    epochs = 1000
+    for epoch in (pbar := tqdm(range(epochs))):
+        model.train()
+        
+        kl_weight = min(1.0, epoch/kl_anneal_epochs)
+        total_loss = 0.0
+        for batch in train_loader:
+            batch = batch.to(device)
+            logits, adj_gt, mask, mu, logvar = model(batch)
+            
+
+            # weighted BCE on raw logits
+            loss_recon = model.bce(logits[mask], adj_gt[mask])
+            loss_kl    = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+            
+
+            probs = torch.sigmoid(logits)            # [B, N, N]
+            deg   = probs.sum(-1)                    # expected degree per node
+            iso_pen = F.relu(1.0 - deg)              # >0 only for “nearly isolated” nodes
+            conn_loss = (iso_pen * mask.float()).sum() / mask.sum()
+
+            loss = loss_recon + kl_weight*loss_kl + model.lambda_conn*conn_loss
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            total_loss += loss.item() * batch.num_graphs
+            
+            
+            
+        pbar.set_description(f"Loss: {total_loss/len(train_dataset):.4f}")
+
+torch.save(model.state_dict(), "models/vae.pth")
+
+
+dgm_samples = model.sample_connected_graph(num_samples=3)
+# Display graphs
+for i, G in enumerate(dgm_samples):
+    print(f"Sample {i}: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+    nx.draw(G, node_size=50); plt.show()
 
 # 2.5 Statistics
 def get_statistics(graphs):
@@ -190,147 +446,37 @@ def get_statistics(graphs):
         stats["eigenvector"].extend(list(nx.eigenvector_centrality_numpy(G).values()))
     return stats
 
-# usage example:
 
 # retrieve all training graphs in dataset
 # and convert them to networkx graphs
 train_nx = graphs_from_dataset(train_dataset)
 
 train_stats  = get_statistics(train_nx)
-sample_stats = get_statistics(samples)
+sample_stats = get_statistics(samples) # baseline
+dgm_stats = get_statistics(dgm_samples) # deep generative model
 
 # plotting
-fig, axes = plt.subplots(3, 2, figsize=(8, 10))
+fig, axes = plt.subplots(3, 3, figsize=(12, 10))
 metrics = ["degree", "clustering", "eigenvector"]
 for i, m in enumerate(metrics):
-    axes[i,0].hist(train_stats[m],  bins=20, density=True)
-    axes[i,0].set_title(f"Train {m}")
-    axes[i,1].hist(sample_stats[m], bins=20, density=True)
-    axes[i,1].set_title(f"Sampled {m}")
+    
+    axes[i, 0].hist(train_stats[m], bins=20, density=True)
+    axes[i, 0].set_title(f"Training dataset {m}")
+
+    axes[i, 1].hist(sample_stats[m], bins=20, density=True)
+    axes[i, 1].set_title(f"Baseline {m}")
+
+    axes[i, 2].hist(dgm_stats[m], bins=20, density=True)
+    axes[i, 2].set_title(f"Deep Generative Model {m}")
+    
+    
 plt.tight_layout()
 plt.savefig("stats.png")
-# plt.show()
-
-# Provide a graph level VAE implementation
+plt.show()
 
 
+print("Novelty & Uniqueness for baseline samples")
+novelty_and_uniqueness(samples)
 
-import torch
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, global_mean_pool
-from torch_geometric.utils import to_dense_adj, to_dense_batch
-
-
-class GraphLevelVAE(torch.nn.Module):
-    def __init__(self, in_dim, hid_dim, lat_dim):
-        super().__init__()
-        
-        self.in_dim = in_dim
-        self.hid_dim = hid_dim
-        self.lat_dim = lat_dim
-    
-    def encoder():
-        pass
-    
-    def decoder():
-        pass
-    
-    def forward(self, data):
-        # forward pass
-        mu, logvar = self.encode(data.x, data.edge_index, data.batch)
-        print(data.x)
-        print(data.batch)
-        
-        # encoder
-        # decoder
-        
-model = GraphLevelVAE(in_dim=node_feature_dim, hid_dim=64, lat_dim=32).to(device)
-# opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-epochs = 10
-for epoch in tqdm(range(epochs)):
-    model.train()
-    
-    total_loss = 0.0
-    for batch in train_loader:
-        batch = batch.to(device)
-        
-        # adj_pred is the predicted adjacency matrix with probabilities instead of entries
-        # adj_gt is the ground truth adjacency matrix
-        # mask is a boolean tensor indicating which elements to compute the loss for
-        # mu and logvar are the latent variables
-        adj_pred, adj_gt, mask, mu, logvar = model(batch) 
-        
-        
-        # only compute BCE where mask==True
-        loss_recon = F.binary_cross_entropy(
-            adj_pred[mask], adj_gt[mask]
-        )
-        
-        loss_kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-        loss = loss_recon + loss_kl
-        # opt.zero_grad(); loss.backward(); opt.step()
-        total_loss += loss.item() * batch.num_graphs
-        
-    print(f"Epoch {epoch:02d} | Loss: {total_loss/len(train_dataset):.4f}")
-
-
-# class GraphLevelVAE(torch.nn.Module):
-#     def __init__(self, in_dim, hid_dim, lat_dim):
-#         super().__init__()
-#         # Encoder GNN
-#         self.conv1 = GCNConv(in_dim, hid_dim)
-#         self.conv2 = GCNConv(hid_dim, hid_dim)
-#         # Graph-level latent parameters
-#         self.lin_mu     = torch.nn.Linear(hid_dim, lat_dim)
-#         self.lin_logvar = torch.nn.Linear(hid_dim, lat_dim)
-#         # Decoder MLP
-#         self.dec1 = torch.nn.Linear(lat_dim, hid_dim)
-#         self.dec2 = torch.nn.Linear(hid_dim, hid_dim)
-
-#     def encode(self, x, edge_index, batch):
-#         x = F.relu(self.conv1(x, edge_index))
-#         x = F.relu(self.conv2(x, edge_index))
-#         g = global_mean_pool(x, batch)             # [b, hid_dim]
-#         return self.lin_mu(g), self.lin_logvar(g)
-
-#     def reparam(self, mu, logvar):
-#         std = torch.exp(0.5 * logvar)
-#         return mu + std * torch.randn_like(std)
-
-#     def decode(self, z, batch):
-#         h = F.relu(self.dec1(z))
-#         h = F.relu(self.dec2(h))                   # [b, hid_dim]
-#         # expand per-graph z to per-node embeddings
-#         h_nodes, mask = to_dense_batch(h, batch)   # [b, N_max, hid_dim]
-#         # adjacency logits via inner-product
-#         adj_logits = torch.matmul(h_nodes, h_nodes.transpose(-1,-2))
-#         return torch.sigmoid(adj_logits), mask     # [b, N_max, N_max]
-
-#     def forward(self, data):
-#         mu, logvar = self.encode(data.x, data.edge_index, data.batch)
-#         z = self.reparam(mu, logvar)
-
-#         adj_pred, mask = self.decode(z, data.batch)
-#         adj_gt = to_dense_adj(data.edge_index, data.batch)  # [b, N_max, N_max]
-#         return adj_pred, adj_gt, mask, mu, logvar
-
-
-# model = GraphLevelVAE(in_dim=node_feature_dim, hid_dim=64, lat_dim=32).to(device)
-# opt   = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-# for epoch in tqdm(range(1, 51)):
-#     model.train()
-#     total_loss = 0
-#     for batch in train_loader:
-#         batch = batch.to(device)
-#         adj_p, adj_t, mask, mu, logvar = model(batch)
-#         # only compute BCE where mask==True
-#         loss_recon = F.binary_cross_entropy(
-#             adj_p[mask], adj_t[mask]
-#         )
-#         loss_kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-#         loss = loss_recon + loss_kl
-#         opt.zero_grad(); loss.backward(); opt.step()
-#         total_loss += loss.item() * batch.num_graphs
-#     print(f"Epoch {epoch:02d} | Loss: {total_loss/len(train_dataset):.4f}")
+print("Novelty & Uniqueness for deep generative model samples")
+novelty_and_uniqueness(dgm_samples)
