@@ -10,7 +10,7 @@ from networkx.algorithms import isomorphism
 from torch_geometric.utils import to_networkx
 
 
-device = 'cpu'
+device = 'cuda'
 
 # Load the MUTAG dataset
 # Load data
