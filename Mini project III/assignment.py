@@ -14,7 +14,7 @@ device = 'cuda'
 
 # Load the MUTAG dataset
 # Load data
-dataset = TUDataset(root='./data/', name='MUTAG').to(device)
+dataset = TUDataset(root='./data/', name='MUTAG')
 node_feature_dim = 7
 
 # Split into training and validation
@@ -134,18 +134,23 @@ def graphs_from_dataset(dataset):
 
 # 2.4 Novelty & Uniqueness
 
-def novelty_and_uniqueness(graphs):
+def novelty_and_uniqueness(gen_graphs, ref_graphs=None):
     novel = 0
     unique = 0
     novel_and_unique = 0
     seen = []
 
-    # retrieve all training graphs in dataset
-    # and convert them to networkx graphs
-    train_nx = graphs_from_dataset(train_dataset)
+    if ref_graphs is None:
+        ref_graphs = graphs_from_dataset(train_dataset)
+        
+    n = len(gen_graphs)
+    
+    # # retrieve all training graphs in dataset
+    # # and convert them to networkx graphs
+    # train_nx = graphs_from_dataset(train_dataset)
 
-    for G in tqdm(graphs):
-        is_novel  = not any(nx.is_isomorphic(G, H) for H in train_nx) # Novel if not iso to any training graph
+    for G in tqdm(gen_graphs, desc="iso-check"):
+        is_novel  = not any(nx.is_isomorphic(G, H) for H in ref_graphs) # Novel if not iso to any training graph
         is_unique = not any(nx.is_isomorphic(G, H) for H in seen) # Unique if not iso to any previously seen sample
         
         if is_novel:  novel += 1
@@ -154,11 +159,9 @@ def novelty_and_uniqueness(graphs):
 
         seen.append(G)
 
-    print(f"Novelty: {novel/M:.3f}")
-    print(f"Uniqueness: {unique/M:.3f}")
-    print(f"Novel & Unique: {novel_and_unique/M:.3f}")
-
-
+    print(f"Novelty: {novel  / n:.3f}")
+    print(f"Uniqueness: {unique / n:.3f}")
+    print(f"Novel & Unique: {novel_and_unique / n:.3f}")
 
 # example
 
@@ -169,7 +172,7 @@ samples = [
     for _ in range(M)
 ]
 
-novelty_and_uniqueness(samples)
+# novelty_and_uniqueness(samples)
 
 
 # Provide a graph level VAE implementation
@@ -186,7 +189,6 @@ class GraphLevelVAE(torch.nn.Module):
         self.in_dim = in_dim
         self.hid_dim = hid_dim
         self.lat_dim = lat_dim
-        # self.lambda_conn = 6000  # penalize isolated nodes
         
         # encoder GNN
         self.conv1 = GCNConv(in_dim, hid_dim)
@@ -225,7 +227,6 @@ class GraphLevelVAE(torch.nn.Module):
         self.bce   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         
         # initialize edge_decoder bias so logits start near logit(p_pos)
-        init_bias = torch.log(pos_weight) * -1  # since pos_weight=(1−p)/p ⇒ logit(p)=−log(pos_weight)
         with torch.no_grad():
             self.edge_decoder[-1].bias.fill_(-torch.log(pos_weight))
 
@@ -367,12 +368,12 @@ if retrain == False:
         print("Model not found, starting training")
         retrain = True
         
-kl_anneal_epochs = 400
+kl_anneal_epochs = 2000
 lambda_conn = 2.0 
 
-λ_iso   =  5.0       # pushes every node to have ≥ 1 neighbour
-λ_dense =  2.0       # discourages degrees above MAX_DEG
-λ_l1    =  1e-3      # global sparsity
+lambda_iso = 8.0 # pushes every node to have >= 1 neighbour
+lambda_dense = 10.0 # discourages degrees above MAX_DEG
+lambda_l1 = 5e-4  # global sparsity
 
 
 all_train_degs = torch.tensor([d for G in graphs_from_dataset(train_dataset)
@@ -385,24 +386,30 @@ if retrain == True:
     epochs = 1000
     for epoch in (pbar := tqdm(range(epochs))):
         model.train()
-        kl_weight = min(1.0, epoch / kl_anneal_epochs)
         total_loss = 0.0
 
+        kl_weight = min(0.6, epoch / kl_anneal_epochs)
+        
         for batch in train_loader:
-            batch   = batch.to(device)
+            batch = batch.to(device)
             logits, adj_gt, node_mask_no_padding, mu, logvar = model(batch)
-
+            edge_mask = node_mask_no_padding.unsqueeze(1) & node_mask_no_padding.unsqueeze(2)
+            diag_mask = torch.eye(edge_mask.size(1), dtype=torch.bool, device=edge_mask.device)
+            edge_mask &= ~diag_mask # remove diagonal
+            
             # Loss
             
             # BCE reconstruction
-            loss_rec = model.bce(logits[node_mask_no_padding], adj_gt[node_mask_no_padding])
+            loss_rec = model.bce(logits[edge_mask], adj_gt[edge_mask])
             
             # KL divergence between the approximate posterior q(z|x) and the prior p(z)
             loss_kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
             
             # Connectivity (penalise isolated nodes)
-            p_edge = torch.sigmoid(logits) # expected degree of each edge
-            deg      = p_edge.sum(-1)
+            p_edge   = torch.sigmoid(logits)
+            p_edge_masked = p_edge.masked_fill(~edge_mask, 0.0) # expected degree of each edge
+            
+            deg = p_edge_masked.sum(-1)
             iso_loss = F.relu(1.0 - deg)
             iso_loss = (iso_loss * node_mask_no_padding).sum() / node_mask_no_padding.sum()
             
@@ -416,9 +423,9 @@ if retrain == True:
             # combine losses
             loss = (loss_rec
             + kl_weight * loss_kl
-            + λ_iso   * iso_loss
-            + λ_dense * dense_pen
-            + λ_l1    * l1_edges)
+            + lambda_iso   * iso_loss
+            + lambda_dense * dense_pen
+            + lambda_l1    * l1_edges)
             
             opt.zero_grad()
             loss.backward()
@@ -428,11 +435,11 @@ if retrain == True:
 
         pbar.set_description(f"Loss: {total_loss / len(train_dataset):.4f}")
 
-torch.save(model.state_dict(), "models/vae.pth")
+# torch.save(model.state_dict(), "models/vae.pth")
 
 
-dgm_samples = model.sample_from_vae(num_samples=3)
-# dgm_samples = model.sample_connected_graph(num_samples=3)
+# dgm_samples = model.sample_from_vae(num_samples=3)
+dgm_samples = model.sample_connected_graph(num_samples=3)
 # Display graphs
 for i, G in enumerate(dgm_samples):
     print(f"Sample {i}: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
