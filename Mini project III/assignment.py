@@ -340,11 +340,16 @@ class GraphLevelVAE(torch.nn.Module):
             samples.append(nx.from_numpy_array(A))
         return samples
 
-    def sample_connected_graph(self):
-        while True:
-            G = self.sample_from_vae(1)[0]
-            if nx.is_connected(G): return G
-    
+    def sample_connected_graph(self, num_samples=1):
+        samples = []
+        for _ in range(num_samples):
+            while True:
+                G = self.sample_from_vae(1)[0]
+                if nx.is_connected(G):
+                    samples.append(G)
+                    break
+        return samples
+
     def forward(self, data):
         mu, logvar     = self.encode(data.x, data.edge_index, data.batch)
         z              = self.reparam(mu, logvar)
