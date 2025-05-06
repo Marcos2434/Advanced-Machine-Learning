@@ -127,6 +127,9 @@ def graphs_from_dataset(dataset):
     for data in dataset:
         G = to_networkx(data, to_undirected=True)
         G.remove_edges_from(nx.selfloop_edges(G))
+        for i, node in enumerate(G.nodes()):
+            label = data.x[i].argmax().item()  # one-hot to label index
+            G.nodes[node]['atom'] = str(label)
         nx_graphs.append(G)
     return nx_graphs
 
@@ -135,12 +138,16 @@ def graphs_from_dataset(dataset):
 
 from networkx.algorithms.graph_hashing import weisfeiler_lehman_graph_hash
 
-def novelty_and_uniqueness(gen_graphs, ref_graphs=None):
+def novelty_and_uniqueness(gen_graphs, use_feature, ref_graphs=None):
     if ref_graphs is None:
         ref_graphs = graphs_from_dataset(train_dataset)
 
-    gen_hashes = [weisfeiler_lehman_graph_hash(g) for g in gen_graphs]
-    ref_hashes = set(weisfeiler_lehman_graph_hash(g) for g in ref_graphs)
+    if use_feature:
+        gen_hashes = [weisfeiler_lehman_graph_hash(g, node_attr='atom') for g in gen_graphs]
+        ref_hashes = set(weisfeiler_lehman_graph_hash(g, node_attr='atom') for g in ref_graphs)
+    else:
+        gen_hashes = [weisfeiler_lehman_graph_hash(g) for g in gen_graphs]
+        ref_hashes = set(weisfeiler_lehman_graph_hash(g) for g in ref_graphs)
 
     seen = set()
     novel = unique = novel_and_unique = 0
@@ -348,7 +355,11 @@ class GraphLevelVAE(torch.nn.Module):
             # sample a symmetric adjacency
             tri = torch.rand_like(probs).triu(1) < probs.triu(1)
             A   = (tri | tri.T).int().cpu().numpy()
-            samples.append(nx.from_numpy_array(A))
+
+            G = nx.from_numpy_array(A)
+            for i, f in enumerate(feats):
+                G.nodes[i]['atom'] = str(f)
+            samples.append(G)
 
         return samples
 
@@ -521,7 +532,7 @@ plt.show()
 
 
 print("Novelty & Uniqueness for baseline samples")
-novelty_and_uniqueness(samples)
+novelty_and_uniqueness(samples, use_feature=False)
 
 print("Novelty & Uniqueness for deep generative model samples")
-novelty_and_uniqueness(dgm_samples)
+novelty_and_uniqueness(dgm_samples, use_feature=True)
