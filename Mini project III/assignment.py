@@ -6,7 +6,6 @@ from torch_geometric.datasets import TUDataset
 from torch_geometric.loader import DataLoader
 from torch.utils.data import random_split
 import networkx as nx
-from networkx.algorithms import isomorphism
 from torch_geometric.utils import to_networkx
 
 
@@ -127,41 +126,68 @@ def graphs_from_dataset(dataset):
     nx_graphs = []
     for data in dataset:
         G = to_networkx(data, to_undirected=True)
-        G.remove_edges_from(nx.selfloop_edges(G)) # remove self-loops if any
+        G.remove_edges_from(nx.selfloop_edges(G))
         nx_graphs.append(G)
     return nx_graphs
 
 
 # 2.4 Novelty & Uniqueness
 
-def novelty_and_uniqueness(gen_graphs, ref_graphs=None):
-    novel = 0
-    unique = 0
-    novel_and_unique = 0
-    seen = []
+from networkx.algorithms.graph_hashing import weisfeiler_lehman_graph_hash
 
+def novelty_and_uniqueness(gen_graphs, ref_graphs=None):
     if ref_graphs is None:
         ref_graphs = graphs_from_dataset(train_dataset)
-        
-    n = len(gen_graphs)
-    
-    # # retrieve all training graphs in dataset
-    # # and convert them to networkx graphs
-    # train_nx = graphs_from_dataset(train_dataset)
 
-    for G in tqdm(gen_graphs, desc="iso-check"):
-        is_novel  = not any(nx.is_isomorphic(G, H) for H in ref_graphs) # Novel if not iso to any training graph
-        is_unique = not any(nx.is_isomorphic(G, H) for H in seen) # Unique if not iso to any previously seen sample
-        
-        if is_novel:  novel += 1
+    gen_hashes = [weisfeiler_lehman_graph_hash(g) for g in gen_graphs]
+    ref_hashes = set(weisfeiler_lehman_graph_hash(g) for g in ref_graphs)
+
+    seen = set()
+    novel = unique = novel_and_unique = 0
+
+    for h in gen_hashes:
+        is_novel = h not in ref_hashes
+        is_unique = h not in seen
+
+        if is_novel: novel += 1
         if is_unique: unique += 1
         if is_novel and is_unique: novel_and_unique += 1
 
-        seen.append(G)
+        seen.add(h)
 
-    print(f"Novelty: {novel  / n:.3f}")
+    n = len(gen_graphs)
+    print(f"Novelty: {novel / n:.3f}")
     print(f"Uniqueness: {unique / n:.3f}")
     print(f"Novel & Unique: {novel_and_unique / n:.3f}")
+
+# def novelty_and_uniqueness(gen_graphs, ref_graphs=None):
+#     novel = 0
+#     unique = 0
+#     novel_and_unique = 0
+#     seen = []
+#
+#     if ref_graphs is None:
+#         ref_graphs = graphs_from_dataset(train_dataset)
+#
+#     n = len(gen_graphs)
+#
+#     # # retrieve all training graphs in dataset
+#     # # and convert them to networkx graphs
+#     # train_nx = graphs_from_dataset(train_dataset)
+#
+#     for G in tqdm(gen_graphs, desc="iso-check"):
+#         is_novel  = not any(nx.is_isomorphic(G, H) for H in ref_graphs) # Novel if not iso to any training graph
+#         is_unique = not any(nx.is_isomorphic(G, H) for H in seen) # Unique if not iso to any previously seen sample
+#
+#         if is_novel:  novel += 1
+#         if is_unique: unique += 1
+#         if is_novel and is_unique: novel_and_unique += 1
+#
+#         seen.append(G)
+#
+#     print(f"Novelty: {novel  / n:.3f}")
+#     print(f"Uniqueness: {unique / n:.3f}")
+#     print(f"Novel & Unique: {novel_and_unique / n:.3f}")
 
 # example
 
