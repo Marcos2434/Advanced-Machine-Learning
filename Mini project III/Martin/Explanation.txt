@@ -1,0 +1,48 @@
+assignment_GNN:
+I told ChatGPT to use Marcos' assignment.py as a template and add a GAN.
+In the VAE graph, the eigenvector is mostly focused in 0. 
+---
+GAN step  4500/5000   D_loss 0.299   G_loss 1.679
+GAN step  5000/5000   D_loss 0.296   G_loss 1.636
+GAN trained
+GAN Fast sampled
+
+Baseline
+novelty 1.000  uniqueness 1.000  both 1.000
+
+VAE
+novelty 0.999  uniqueness 0.992  both 0.991
+
+GAN
+novelty 0.786  uniqueness 0.103  both 0.099
+
+---------------
+---------------
+assignment_GNN_02:
+ChatGPT said it could be better, adding weird losses and a critic to the GAN and improving the VAE (it didn't improve in the graphs though)
+so that it does not focus that much in eigenvector 0.
+Here, the GAN losses can be negative.
+Also, the epochs are way up and the latent dimensions and so on are way up.
+Ideally, the losses at the GANs are the same value.
+---
+GAN step 9000/10000   D_loss -0.635   G_loss 0.175
+GAN step 9500/10000   D_loss -1.190   G_loss 0.506
+GAN step 10000/10000   D_loss -0.865   G_loss 0.706
+GAN trained
+GAN Fast sampled
+
+Baseline
+novelty 1.000  uniqueness 1.000  both 1.000
+
+VAE
+novelty 0.999  uniqueness 0.982  both 0.981
+
+GAN
+novelty 0.904  uniqueness 0.617  both 0.598
+
+---------------
+---------------
+assignment_GNN_03:
+This doesn't work properly.
+The assignment says that we must use GCNConv or something like that in our networks. But our previous GANs are just MLPs that take the adjacency matrices.
+The idea is to change the architectures and make them work. But I am going to focus on the report.
