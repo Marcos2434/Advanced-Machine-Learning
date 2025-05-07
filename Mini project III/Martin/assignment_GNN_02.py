@@ -12,6 +12,7 @@ from networkx.algorithms.graph_hashing import weisfeiler_lehman_graph_hash as wl
 import itertools
 import torch
 import torch.nn as nn
+import random
 
 ########################
 ### CONSTANTS ###
@@ -125,7 +126,7 @@ class GraphVAE(nn.Module):
 
 def train_vae(loader, in_dim=7, hid=128, lat=64,
               N_max=max(d.num_nodes for d in dataset),
-              epochs=1000):
+              epochs=5000):
     vae = GraphVAE(in_dim, hid, lat, N_max).to(device)
     opt = torch.optim.Adam(vae.parameters(), 1e-3)
     for ep in range(epochs):
@@ -143,29 +144,45 @@ def train_vae(loader, in_dim=7, hid=128, lat=64,
             loss_dense = F.relu(deg - MAX_DEG).mean()  # over‑dense penalty
             loss_l1    = adj_hat.mean()                # global L1 on edges
 
+            #conn_loss = 0.
+            #for P in adj_hat:                              # loop over graphs
+            #    L  = torch.diag(P.sum(1)) - P
+            #    λ2 = torch.sort(torch.linalg.eigvals(L).real)[0][1]
+            #    conn_loss += F.relu(0.05 - λ2)
+            #conn_loss = conn_loss / adj_hat.size(0)
+
             loss =  (loss_recon
                 +  0.6   * loss_kl          # KL annealed to 0.6
                 +  8.0   * loss_iso
                 + 10.0   * loss_dense
                 +  5e-4  * loss_l1)
+                #+ 2.0   * conn_loss)
             opt.zero_grad(); loss.backward(); opt.step()
+        
+        if ep == 1 or ep % 200 == 0:
+            print(f"VAE epoch {ep:>4}/{epochs}   "
+                  f"loss {loss.item():.3f} ")
     return vae
 
 @torch.no_grad()
 def sample_vae(vae, num_graphs, ref_ds):
+    """Same as sample_vae but keeps only connected graphs."""
+    # empirical node-count distribution
     num_nodes = np.array([d.num_nodes for d in ref_ds])
-    vals, cnt = np.unique(num_nodes, return_counts=True)
-    pN        = cnt / cnt.sum()
+    vals, cnt  = np.unique(num_nodes, return_counts=True)
+    pN         = cnt / cnt.sum()
 
-    graphs=[]
-    for _ in range(num_graphs):
+    out = []
+    while len(out) < num_graphs:       # ← use num_graphs here
         N = int(np.random.choice(vals, p=pN))
         z = torch.randn(1, vae.lat_dim, device=device)
-        probs = vae.decode(z, N)[0]
+        probs = vae.decode(z, N)[0]              # [N,N] edge-probs
         tri   = (torch.rand_like(probs).triu(1) < probs.triu(1))
         A     = (tri | tri.T).int().cpu().numpy()
-        graphs.append(nx.from_numpy_array(A))
-    return graphs
+        G     = nx.from_numpy_array(A)
+        if nx.is_connected(G):
+            out.append(G)
+    return out
 
 ########################################################################
 # 3.  Graph‑GAN  (generator, discriminator, training, sampling)
@@ -271,7 +288,6 @@ def train_gan(loader,
     data_iter = itertools.cycle(loader)
     n_critic  = 5    # #D updates per G update
     λ_gp      = 10.0 # gradient-penalty weight
-
     for step in range(1, epochs+1):
         # ——— 1) update D n_critic times —————————————————————————
         for _ in range(n_critic):
@@ -451,11 +467,12 @@ baseline = sample_er_connected(1000, train_ds)
 # --- VAE --------------------------------------------------------------
 #vae     = train_vae(train_ld)
 #vae     = train_vae(train_ld, in_dim=7, hid=128, lat=64)
+print('bbb')
 vae     = train_vae(train_ld, in_dim=7, hid=256, lat=128)
 print('VAE trained')
 vae_gen = sample_vae(vae, 1000, train_ds)
 print('VAE sampled')
-
+print("share connected:", sum(nx.is_connected(g) for g in vae_gen)/3.)
 # --- GraphRNN ---------------------------------------------------------
 #gan_gen = sample_gan(train_gan(train_ld), 1000, train_ds)
 gan = train_gan(train_ld)          # takes ~3–4 min on GPU
@@ -504,7 +521,36 @@ for row, metric in enumerate(metrics):
 plt.tight_layout()
 plt.show()
 
+# ---- 4) qualitative: draw one example of each, same #nodes ----
 
+# 1) pick a target node‐count N from the training set
+node_counts = [G.number_of_nodes() for G in train_nx]
+N = random.choice(node_counts)
+
+# 2) for each set, grab one graph with exactly N nodes (if none, skip)
+examples = {}
+for name, graph_list in sets.items():
+    # filter by size
+    candidates = [G for G in graph_list if G.number_of_nodes() == N]
+    if len(candidates) == 0:
+        # fallback: pick any (will mismatch size)
+        candidates = graph_list
+    examples[name] = random.choice(candidates)
+
+# 3) plot them in a 1×4 row
+fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+for ax, (name, G) in zip(axes, examples.items()):
+    pos = nx.spring_layout(G, seed=42)   # consistent layout
+    nx.draw(G, pos=pos, ax=ax,
+            node_size=50, linewidths=0.5,
+            with_labels=False,
+            edge_color="#888",
+            node_color="#4472c4")
+    ax.set_title(f"{name}\n|V|={G.number_of_nodes()}  |E|={G.number_of_edges()}")
+    ax.axis('off')
+
+plt.tight_layout()
+plt.show()
 '''# --- Evaluation -------------------------------------------------------
 for name,graphs in [("Baseline",baseline),("VAE",vae_gen),("GraphRNN",grnn_gen)]:
     print(f"\n{name}")
